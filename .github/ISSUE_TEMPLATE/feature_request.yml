@@ -1,0 +1,41 @@
+name: Feature request
+description: Suggest an improvement to Ghostpin
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Ghostpin is a front-end for Apple's developer location-simulation
+        service. Requests that require bypassing Developer Mode, device trust, or
+        a third party's fraud controls are out of scope — see
+        [CONTRIBUTING.md](../blob/main/CONTRIBUTING.md).
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem are you trying to solve?
+      description: Describe the situation, not the solution.
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: What would you like Ghostpin to do?
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives you have considered
+
+  - type: checkboxes
+    id: scope
+    attributes:
+      label: Scope
+      options:
+        - label: This does not require bypassing Developer Mode, device pairing, or any Apple security control.
+          required: true
+        - label: This is not primarily intended to defeat a specific service's fraud or integrity checks.
+          required: true

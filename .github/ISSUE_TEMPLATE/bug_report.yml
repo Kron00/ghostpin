@@ -1,0 +1,104 @@
+name: Bug report
+description: Something in Ghostpin does not work as documented
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Before you post: **scrub your device UDID and any real coordinates** from
+        logs and screenshots. If you need to show the map, spoof to a public
+        landmark first and screenshot that instead of your real location.
+
+  - type: checkboxes
+    id: prereqs
+    attributes:
+      label: Prerequisites
+      options:
+        - label: Developer Mode is enabled on the iPhone and the device is trusted by this Mac.
+          required: true
+        - label: I am using the latest Ghostpin release.
+          required: true
+        - label: I have removed my UDID, home address, and real coordinates from everything I am about to paste.
+          required: true
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: What did you expect, and what did you get instead?
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. Launch Ghostpin
+        2. Connect over USB
+        3. ...
+    validations:
+      required: true
+
+  - type: input
+    id: ios-version
+    attributes:
+      label: iOS version
+      description: Exact version, from Settings → General → About.
+      placeholder: "27.0"
+    validations:
+      required: true
+
+  - type: input
+    id: device-model
+    attributes:
+      label: iPhone model
+      placeholder: "iPhone 16 Pro"
+    validations:
+      required: true
+
+  - type: input
+    id: macos-version
+    attributes:
+      label: macOS version
+      placeholder: "15.2"
+    validations:
+      required: true
+
+  - type: input
+    id: ghostpin-version
+    attributes:
+      label: Ghostpin version
+      placeholder: "2.0.0"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: install-method
+    attributes:
+      label: How are you running Ghostpin?
+      options:
+        - DMG / app bundle
+        - From source via ./start.sh
+    validations:
+      required: true
+
+  - type: dropdown
+    id: connection
+    attributes:
+      label: Connection type
+      options:
+        - USB
+        - Wi-Fi
+        - Both fail
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Error output
+      description: >
+        The full text of any error banner, plus the terminal output including any
+        pymobiledevice3 traceback. This is rendered as code, no backticks needed.
+      render: shell

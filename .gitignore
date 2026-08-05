@@ -1,0 +1,55 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+*.egg
+.venv/
+venv/
+env/
+
+# Build artifacts
+build/
+dist/
+*.spec
+*.icns
+*.dmg
+
+# macOS
+.DS_Store
+._*
+.Spotlight-V100
+.Trashes
+
+# App data (may contain real locations / device identifiers)
+saved_locations.json
+profiles.json
+schedules.json
+routes.json
+.tunneld.log
+*.log
+
+# Test evidence — screenshots of real devices, never commit
+test-evidence/
+screenshots/
+*.gpx
+
+# Editors
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Secrets
+.env
+.env.*
+*.pem
+*.key
+credentials.json
+
+# AI tooling
+.claude/
+.superpowers/
+CLAUDE.md
+claude.md
+.claude.md
+docs/superpowers/
