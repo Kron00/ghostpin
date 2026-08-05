@@ -17,6 +17,17 @@ from pymobiledevice3.services.mobile_image_mounter import MobileImageMounterServ
 TUNNELD_PORT = 49151
 
 
+def mask_udid(udid):
+    """Shorten a UDID for display. Terminal output and the UI end up in
+    screenshots attached to bug reports; a full UDID identifies the device."""
+    if not udid:
+        return "unknown"
+    text = str(udid)
+    if len(text) <= 12:
+        return "…"
+    return f"{text[:6]}…{text[-4:]}"
+
+
 class AsyncBridge:
     """Persistent asyncio event loop in a background thread."""
 
@@ -31,7 +42,15 @@ class AsyncBridge:
 
     def run(self, coro, timeout=30):
         future = asyncio.run_coroutine_threadsafe(coro, self.loop)
-        return future.result(timeout=timeout)
+        try:
+            return future.result(timeout=timeout)
+        except BaseException:
+            # Waiting on the result is not the same as stopping the work. A
+            # timed-out coroutine keeps running on the loop and can complete
+            # later, overwriting state the caller has already torn down and
+            # replaced — so cancel it before propagating.
+            future.cancel()
+            raise
 
 
 class DeviceManager:
@@ -62,14 +81,29 @@ class DeviceManager:
         self._auto_reconnect = False
         self._reconnect_thread = None
         self._reconnect_callback = None
+        self._pre_reconnect_callback = None
+        # One lock owns the whole session lifecycle: connect, disconnect,
+        # reconnect. Without it the background reconnect thread can tear down
+        # the provider while a request thread is mid-connect. Re-entrant
+        # because connect() calls disconnect() on its own failure path.
+        # Callbacks are always invoked *outside* this lock: they take the
+        # app-level state lock, and holding both in opposite orders deadlocks.
+        self._session_lock = threading.RLock()
+        self._generation = 0
         atexit.register(self.shutdown)
 
     # ── Auto-reconnect ─────────────────────────────────────
 
-    def enable_auto_reconnect(self, callback=None):
-        """Start background auto-reconnect. callback(device_info) is called on reconnect."""
+    def enable_auto_reconnect(self, callback=None, pre_callback=None):
+        """Start background auto-reconnect.
+
+        pre_callback() runs before the session is torn down, so the caller can
+        stop anything still writing to the old DVT channel. callback(info) runs
+        after a successful reconnect.
+        """
         self._auto_reconnect = True
         self._reconnect_callback = callback
+        self._pre_reconnect_callback = pre_callback
         if not self._reconnect_thread or not self._reconnect_thread.is_alive():
             self._reconnect_thread = threading.Thread(target=self._reconnect_loop, daemon=True)
             self._reconnect_thread.start()
@@ -88,19 +122,33 @@ class DeviceManager:
             if self.device_info.get("connected") and not self._is_connection_alive():
                 print("[!] Device disconnected, attempting auto-reconnect...")
                 self.device_info["connected"] = False
+
+                # Stop the old session's writers before anything is closed
+                # under them, and do it outside the session lock.
+                if self._pre_reconnect_callback:
+                    try:
+                        self._pre_reconnect_callback()
+                    except Exception:
+                        pass
+
+                info = None
                 try:
-                    prefer_wifi = self.device_info.get("connection_type") == "WiFi"
-                    udid = self.device_info.get("udid")
-                    self.disconnect()
-                    info = self.connect(udid=udid, prefer_wifi=prefer_wifi, retries=3, delay=2)
+                    with self._session_lock:
+                        prefer_wifi = self.device_info.get("connection_type") == "WiFi"
+                        udid = self.device_info.get("udid")
+                        self.disconnect()
+                        info = self.connect(
+                            udid=udid, prefer_wifi=prefer_wifi, retries=3, delay=2
+                        )
                     print(f"[+] Auto-reconnected ({info.get('connection_type', 'USB')})")
-                    if self._reconnect_callback:
-                        try:
-                            self._reconnect_callback(info)
-                        except Exception:
-                            pass
                 except Exception as exc:
                     print(f"[!] Auto-reconnect failed: {exc}")
+
+                if info and self._reconnect_callback:
+                    try:
+                        self._reconnect_callback(info)
+                    except Exception:
+                        pass
             time.sleep(10)
 
     def _is_connection_alive(self):
@@ -166,13 +214,19 @@ class DeviceManager:
 
     # ── Tunnel and developer services ─────────────────────
 
-    async def _open_userspace_tunnel(self, udid):
+    async def _open_userspace_tunnel(self, udid, generation):
         tunnel = UserspaceRsdTunnel(serial=udid)
         try:
             rsd = await tunnel.aopen()
         except BaseException:
             await tunnel.aclose()
             raise
+        # If this attempt timed out and the caller has already moved on to the
+        # fallback, publishing here would overwrite the live session and leave
+        # cleanup closing the wrong one. Discard our own work instead.
+        if generation != self._generation:
+            await tunnel.aclose()
+            raise ConnectionError("Userspace tunnel completed after the attempt was abandoned")
         self.userspace_tunnel = tunnel
         self.rsd = rsd
 
@@ -212,7 +266,18 @@ class DeviceManager:
             or "Unknown"
         )
         self.device_info["model"] = properties.get("ProductType", "Unknown")
-        self.device_info["udid"] = properties.get("UniqueDeviceID", self.device_info.get("udid"))
+
+        # The tunneld fallback takes an address from an unauthenticated local
+        # HTTP endpoint, so confirm the device that answered is the one we
+        # selected before driving its location.
+        peer_udid = properties.get("UniqueDeviceID")
+        expected_udid = self.device_info.get("udid")
+        if peer_udid and expected_udid and peer_udid != expected_udid:
+            raise RuntimeError(
+                "Connected device identity does not match the selected device "
+                f"(expected {mask_udid(expected_udid)}, got {mask_udid(peer_udid)})."
+            )
+        self.device_info["udid"] = peer_udid or expected_udid
 
         developer_mode = await self.rsd.get_developer_mode_status()
         self.device_info["developer_mode"] = bool(developer_mode)
@@ -248,14 +313,23 @@ class DeviceManager:
 
     def connect(self, udid=None, prefer_wifi=False, retries=15, delay=2):
         """Connect userspace-first, falling back to privileged tunneld only on tunnel/RSD failure."""
+        with self._session_lock:
+            return self._connect_locked(udid, prefer_wifi, retries, delay)
+
+    def _connect_locked(self, udid, prefer_wifi, retries, delay):
         selected_udid, connection_type = self._wait_for_device(
             udid=udid, prefer_wifi=prefer_wifi, retries=retries, delay=delay
         )
         self.device_info["udid"] = selected_udid
         self.device_info["connection_type"] = connection_type
 
+        self._generation += 1
+        generation = self._generation
+
         try:
-            self.bridge.run(self._open_userspace_tunnel(selected_udid), timeout=90)
+            self.bridge.run(
+                self._open_userspace_tunnel(selected_udid, generation), timeout=90
+            )
             self.device_info["tunnel_mode"] = "userspace"
             print("[+] No-root userspace tunnel established")
         except Exception as userspace_error:
@@ -284,12 +358,18 @@ class DeviceManager:
         self.device_info["connected"] = True
         print(
             f"[+] Connected ({connection_type}, {self.device_info['tunnel_mode']}): "
-            f"{self.device_info['name']} | iOS {self.device_info['ios_version']} | "
-            f"{self.device_info['model']} | DDI mounted"
+            f"iOS {self.device_info['ios_version']} | {self.device_info['model']} | "
+            f"{mask_udid(self.device_info['udid'])} | DDI mounted"
         )
         return dict(self.device_info)
 
     def disconnect(self):
+        with self._session_lock:
+            self._disconnect_locked()
+
+    def _disconnect_locked(self):
+        # Anything still in flight for this session must not land on the next.
+        self._generation += 1
         if self.provider:
             try:
                 self.bridge.run(self.provider.close(), timeout=15)
@@ -315,10 +395,11 @@ class DeviceManager:
         self.device_info["tunnel_mode"] = None
 
     def reconnect(self, udid=None, prefer_wifi=False, retries=15, delay=2):
-        if udid is None:
-            udid = self.device_info.get("udid")
-        self.disconnect()
-        return self.connect(udid=udid, prefer_wifi=prefer_wifi, retries=retries, delay=delay)
+        with self._session_lock:
+            if udid is None:
+                udid = self.device_info.get("udid")
+            self._disconnect_locked()
+            return self._connect_locked(udid, prefer_wifi, retries, delay)
 
     def get_device_info(self):
         return dict(self.device_info)

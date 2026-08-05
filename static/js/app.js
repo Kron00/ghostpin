@@ -324,6 +324,14 @@ document.addEventListener("DOMContentLoaded", async () => {
 });
 
 function $(id) { return document.getElementById(id); }
+
+// A UDID identifies the device permanently, and this panel ends up in
+// screenshots attached to bug reports. Show enough to tell two phones apart.
+function maskUdid(udid) {
+    if (!udid) return "--";
+    const text = String(udid);
+    return text.length <= 12 ? "…" : text.slice(0, 6) + "…" + text.slice(-4);
+}
 function esc(s) { const d = document.createElement("div"); d.textContent = s; return d.innerHTML; }
 function escAttr(s) { return esc(s).replace(/"/g, "&quot;").replace(/'/g, "&#39;"); }
 
@@ -554,7 +562,7 @@ async function pollDevice() {
             const ready = renderDeviceReadiness(d);
             dot.classList.toggle("connected", ready); dot.classList.toggle("degraded", !ready); const ct = d.connection_type || "USB";
             $("device-label").textContent = d.name || "iPhone";
-            $("dev-ios").textContent = d.ios_version || "--"; $("dev-model").textContent = d.model || "--"; $("dev-udid").textContent = d.udid || "--";
+            $("dev-ios").textContent = d.ios_version || "--"; $("dev-model").textContent = d.model || "--"; $("dev-udid").textContent = maskUdid(d.udid);
             const cb = $("dev-conn"); cb.textContent = ct; cb.className = "conn-badge " + ct.toLowerCase();
             $("device-info-compact")?.classList.remove("hidden"); $("setup-guide")?.classList.add("hidden");
             if ($("status-conn-text")) $("status-conn-text").textContent = ct;
@@ -611,7 +619,7 @@ async function toggleDeviceDropdown() {
         list.appendChild(active);
         const availableHeading = document.createElement("div"); availableHeading.className = "device-dropdown-heading available"; availableHeading.textContent = "AVAILABLE DEVICES"; list.appendChild(availableHeading);
         if (!devices.length) { const e = document.createElement("div"); e.className = "empty-state"; e.style.padding = "10px"; e.textContent = "No devices found"; list.appendChild(e); }
-        else { devices.forEach(dev => { const opt = document.createElement("div"); opt.className = "device-option"; const u = document.createElement("span"); u.className = "mono"; u.textContent = dev.udid.substring(0, 12) + "..."; opt.appendChild(u); dev.connection_types.forEach(t => { const b = document.createElement("span"); b.className = "conn-badge " + t.toLowerCase(); b.textContent = t; opt.appendChild(b); }); opt.addEventListener("click", async () => { await connectDevice(false, dev.udid); dd.classList.add("hidden"); }); list.appendChild(opt); }); }
+        else { devices.forEach(dev => { const opt = document.createElement("div"); opt.className = "device-option"; const u = document.createElement("span"); u.className = "mono"; u.textContent = maskUdid(dev.udid); opt.appendChild(u); dev.connection_types.forEach(t => { const b = document.createElement("span"); b.className = "conn-badge " + t.toLowerCase(); b.textContent = t; opt.appendChild(b); }); opt.addEventListener("click", async () => { await connectDevice(false, dev.udid); dd.classList.add("hidden"); }); list.appendChild(opt); }); }
         const badge = $("device-badge"), rect = badge.getBoundingClientRect();
         dd.style.top = (rect.bottom + 4) + "px"; dd.style.right = (window.innerWidth - rect.right) + "px";
         dd.classList.remove("hidden");

@@ -53,6 +53,32 @@ def _reject_cross_origin_writes():
     return None
 
 
+# The page loads Leaflet from unpkg and tiles from CARTO; everything else is
+# same-origin. Geocoding happens in Python, so the browser itself never needs
+# to reach a third party — connect-src stays 'self'. 'unsafe-inline' is only
+# granted to styles, which Leaflet and the panel code set as attributes.
+_CSP = "; ".join([
+    "default-src 'self'",
+    "script-src 'self' https://unpkg.com",
+    "style-src 'self' https://unpkg.com 'unsafe-inline'",
+    "img-src 'self' data: blob: https://*.basemaps.cartocdn.com https://unpkg.com",
+    "connect-src 'self'",
+    "font-src 'self'",
+    "object-src 'none'",
+    "base-uri 'none'",
+    "form-action 'none'",
+    "frame-ancestors 'none'",
+])
+
+
+@app.after_request
+def _security_headers(response):
+    response.headers.setdefault("Content-Security-Policy", _CSP)
+    response.headers.setdefault("X-Content-Type-Options", "nosniff")
+    response.headers.setdefault("Referrer-Policy", "no-referrer")
+    return response
+
+
 # Global state — initialized by main() or main_app.py
 device_mgr = None
 loc_svc = None
@@ -168,13 +194,27 @@ def api_auto_reconnect():
     data = request.json or {}
     enabled = data.get("enabled", True)
 
+    def before_reconnect():
+        # Runs before the old session is torn down. The previous keep-alive
+        # thread would otherwise keep writing to a DVT channel that is being
+        # closed underneath it, and go on retrying against the dead session
+        # while the new one is being built.
+        global loc_svc
+        with _state_lock:
+            if loc_svc:
+                loc_svc.stop_route()
+                loc_svc._stop_keepalive()
+
     def on_reconnect(info):
         global loc_svc
-        if device_mgr and device_mgr.simulator:
-            loc_svc = LocationService(device_mgr.simulator, device_mgr.bridge)
+        with _state_lock:
+            if device_mgr and device_mgr.simulator:
+                loc_svc = LocationService(device_mgr.simulator, device_mgr.bridge)
 
     if enabled:
-        return jsonify(device_mgr.enable_auto_reconnect(callback=on_reconnect))
+        return jsonify(device_mgr.enable_auto_reconnect(
+            callback=on_reconnect, pre_callback=before_reconnect
+        ))
     else:
         return jsonify(device_mgr.disable_auto_reconnect())
 
@@ -710,6 +750,32 @@ def _rank_results(results, query, focus):
     return results
 
 
+# Every cache miss fans out to three geocoders, and unique queries never hit
+# the cache. Bound both the rate and the concurrency so a runaway caller
+# cannot exhaust the request threads or get the user throttled upstream.
+_SEARCH_RATE_PER_SEC = 8.0
+_SEARCH_BURST = 16.0
+_search_tokens = _SEARCH_BURST
+_search_tokens_ts = time.time()
+_search_rate_lock = threading.Lock()
+_search_slots = threading.Semaphore(4)
+
+
+def _search_allowed():
+    global _search_tokens, _search_tokens_ts
+    with _search_rate_lock:
+        now = time.time()
+        _search_tokens = min(
+            _SEARCH_BURST,
+            _search_tokens + (now - _search_tokens_ts) * _SEARCH_RATE_PER_SEC,
+        )
+        _search_tokens_ts = now
+        if _search_tokens < 1.0:
+            return False
+        _search_tokens -= 1.0
+        return True
+
+
 @app.route("/api/search")
 def api_search():
     query = request.args.get("q", "").strip()
@@ -750,6 +816,20 @@ def api_search():
         if cached and time.time() - cached["ts"] < 300:
             return jsonify(cached["data"])
 
+    # Past this point the request costs three outbound calls, so it is rate
+    # limited. The cache lookup above stays free.
+    if not _search_allowed():
+        return jsonify({"error": "Too many searches, slow down"}), 429
+    if not _search_slots.acquire(timeout=5):
+        return jsonify({"error": "Search is busy, try again"}), 429
+
+    try:
+        return _search_providers(query, focus, zoom, country_code, cache_key)
+    finally:
+        _search_slots.release()
+
+
+def _search_providers(query, focus, zoom, country_code, cache_key):
     all_results = []
     with ThreadPoolExecutor(max_workers=3) as pool:
         futures = (
