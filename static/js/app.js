@@ -189,6 +189,11 @@ document.addEventListener("DOMContentLoaded", async () => {
 
     attachAutocomplete($("circle-center"), $("ac-circle-center"), place => { circlePlace = place; });
     $("circle-center").addEventListener("input", () => { circlePlace = null; });
+    $("close-loop").addEventListener("change", event => {
+        closeLoop = event.target.checked;
+        renderStopsOnMap();
+        updateRouteUI();
+    });
     $("btn-map-pick").addEventListener("click", () => setMapPick(mapPickTarget === "append" ? null : "append"));
     $("btn-circle-build").addEventListener("click", buildCircleRoute);
     $("btn-circle-here").addEventListener("click", () => {
@@ -765,6 +770,7 @@ function updateRouteUI() {
     const placed = routeStops.filter(stop => stop.place && stop.place.lat != null);
     if (!calculatedRouteCoordinates && placed.length >= 2) {
         routePoints = placed.map(stop => ({ lat: stop.place.lat, lng: stop.place.lon }));
+        if (closeLoop && routePoints.length >= 3) routePoints.push({ ...routePoints[0] });
     }
     const ready = routePoints.length >= 2;
     $("btn-route-start").disabled = !ready;
@@ -873,8 +879,9 @@ function setStopFromPlace(index, place) {
     routeStops[index] = { text: label, place };
     setBuildMode("stops");
     renderStops();
-    // Show where it landed, and frame the whole plan once there is one.
-    renderStopsOnMap(routeStops.filter(s => s.place).length >= 2);
+    // Draw it, but leave the view exactly where it was: moving the map out
+    // from under someone mid-plan is disorienting.
+    renderStopsOnMap();
     toast("Stop " + stopLabel(index) + " set to " + label);
 }
 
@@ -944,6 +951,7 @@ function handleMapPick(lat, lng) {
 
 let stopMarkers = [];
 let stopLine = null;
+let closeLoop = false;
 
 function clearStopsOnMap() {
     stopMarkers.forEach(m => map.removeLayer(m));
@@ -970,7 +978,9 @@ function renderStopsOnMap(fit = false) {
     });
 
     if (placed.length >= 2) {
-        stopLine = L.polyline(placed.map(e => [e.stop.place.lat, e.stop.place.lon]), {
+        const line = placed.map(e => [e.stop.place.lat, e.stop.place.lon]);
+        if (closeLoop && placed.length >= 3) line.push(line[0]);
+        stopLine = L.polyline(line, {
             color: "#79C2B8", weight: 2, dashArray: "7 6", opacity: 0.65,
         }).addTo(map);
     }
@@ -1221,6 +1231,7 @@ async function calculateAddressRoute() {
     const status = $("route-address-status");
     const stops = routeStops.map(stop => stop.text.trim()).filter(Boolean);
     if (stops.length < 2) return toast("Enter at least a start and a destination", "error");
+    if (closeLoop && stops.length >= 3) stops.push(stops[0]);
     const button = $("btn-route-calculate");
     button.disabled = true; button.textContent = "Calculating…";
     status.classList.remove("hidden");
