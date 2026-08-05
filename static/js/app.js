@@ -516,17 +516,41 @@ async function doSearch(q) {
             const source = document.createElement("span");
             source.className = "search-source " + (res.source === "google" ? "google" : "osm");
             source.textContent = res.source === "google" ? "Google" : (res.source === "coordinates" ? "GPS" : "OSM");
+            const actions = document.createElement("div");
+            actions.className = "search-actions";
+
+            // One button per stop, lettered to match the route builder, so a
+            // search result can go straight into a route without retyping it.
+            routeStops.forEach((stop, stopIndex) => {
+                const assign = document.createElement("button");
+                assign.type = "button";
+                assign.className = "icon-btn stop-assign" + (stop.text ? " is-set" : "");
+                assign.textContent = stopLabel(stopIndex);
+                assign.title = "Set as stop " + stopLabel(stopIndex)
+                    + (stop.text ? " (replaces “" + stop.text + "”)" : "");
+                assign.setAttribute("aria-label", assign.title);
+                assign.addEventListener("click", event => {
+                    event.stopPropagation();
+                    setStopFromPlace(stopIndex, res);
+                    c.classList.remove("visible");
+                });
+                actions.appendChild(assign);
+            });
+
             const googleLink = document.createElement("button");
-            googleLink.className = "search-google-link";
+            googleLink.className = "icon-btn search-google-link";
             googleLink.type = "button";
             googleLink.title = "Open this place in Google Maps";
+            googleLink.setAttribute("aria-label", googleLink.title);
             googleLink.textContent = "↗";
             googleLink.addEventListener("click", event => {
                 event.stopPropagation();
                 const url = "https://www.google.com/maps/search/?api=1&query=" + encodeURIComponent(res.display_name || (res.lat + "," + res.lon));
                 window.open(url, "_blank", "noopener");
             });
-            item.appendChild(iconDiv); item.appendChild(content); item.appendChild(source); item.appendChild(googleLink);
+            actions.appendChild(googleLink);
+
+            item.appendChild(iconDiv); item.appendChild(content); item.appendChild(source); item.appendChild(actions);
             item.addEventListener("click", () => {
                 const lat = parseFloat(item.dataset.lat), lon = parseFloat(item.dataset.lon);
                 if (Array.isArray(res.bbox) && res.bbox.length === 4) {
@@ -749,10 +773,24 @@ function attachAutocomplete(input, resultsEl, onPick) {
 
 let routeStops = [{ text: "", place: null }, { text: "", place: null }];
 
-function stopLabel(index) {
-    if (index === 0) return "A";
-    if (index === routeStops.length - 1) return "B";
-    return String(index);
+// Stops are lettered in order: A, B, C, D… Adding a stop adds the next letter,
+// which is also what the buttons on each search result offer.
+function stopLabel(index) { return String.fromCharCode(65 + index); }
+
+function stopPlaceholder(index) {
+    if (index === 0) return "Start address or place";
+    if (index === routeStops.length - 1) return "Destination address or place";
+    return "Stop " + stopLabel(index);
+}
+
+// Fill a stop from a search result and show the result in the builder.
+function setStopFromPlace(index, place) {
+    if (index < 0 || index >= routeStops.length) return;
+    const label = place.name || place.display_name;
+    routeStops[index] = { text: label, place };
+    setBuildMode("stops");
+    renderStops();
+    toast("Stop " + stopLabel(index) + " set to " + label);
 }
 
 function renderStops() {
@@ -777,8 +815,7 @@ function renderStops() {
         input.className = "route-address-input";
         input.autocomplete = "off";
         input.value = stop.text;
-        input.placeholder = index === 0 ? "Start address or place"
-            : (index === routeStops.length - 1 ? "Destination address or place" : "Stop " + index);
+        input.placeholder = stopPlaceholder(index);
         input.setAttribute("aria-label", input.placeholder);
         input.addEventListener("input", () => { routeStops[index].text = input.value; routeStops[index].place = null; });
         field.appendChild(input);

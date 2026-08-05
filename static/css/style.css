@@ -304,17 +304,44 @@ body {
     font-size: var(--t-sm);
     color: var(--text-tertiary);
 }
-.search-google-link {
-    display: block;
-    padding: 8px;
-    margin-top: 2px;
-    border-top: 1px solid var(--border);
-    text-align: center;
-    font-size: var(--t-meta);
-    color: var(--accent);
-    cursor: pointer;
+/* Actions on the right of a search result. These are <button> elements, so
+   they need a full reset — inheriting the UA button face is what made them
+   render as grey bevelled boxes. */
+.search-actions {
+    display: flex;
+    align-items: center;
+    gap: 3px;
+    flex-shrink: 0;
 }
-.search-google-link:hover { background: var(--surface-hover); }
+
+.icon-btn {
+    appearance: none;
+    -webkit-appearance: none;
+    width: 24px;
+    height: 24px;
+    display: grid;
+    place-items: center;
+    padding: 0;
+    background: transparent;
+    border: 1px solid var(--border);
+    border-radius: var(--r-xs);
+    color: var(--text-tertiary);
+    font-family: var(--font);
+    font-size: var(--t-meta);
+    font-weight: 600;
+    line-height: 1;
+    cursor: pointer;
+    transition: all var(--dur) var(--ease);
+}
+.icon-btn:hover { background: var(--surface-hover); color: var(--text); border-color: var(--border-strong); }
+
+/* Assign this place to a stop. The letter matches the route builder. */
+.stop-assign { font-variant-numeric: tabular-nums; }
+.stop-assign:hover { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); }
+.stop-assign.is-set { border-color: var(--accent-line); color: var(--accent); }
+
+.search-google-link { color: var(--accent); }
+.search-google-link:hover { background: var(--accent-bg); border-color: var(--accent-line); color: var(--accent); }
 
 /* ── Top bar buttons ─────────────────────────────────────────── */
 
