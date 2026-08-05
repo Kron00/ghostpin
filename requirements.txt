@@ -1,4 +1,4 @@
 pymobiledevice3==10.3.1
 flask>=3.0.0
 requests>=2.31.0
-pywebview>=5.0
+pywebview>=6.2.1
