@@ -937,21 +937,134 @@ def _google_directions_route(origin, destination):
     }
 
 
+def _google_multi_stop_route(stops):
+    """Chain Google's two-point directions across an arbitrary list of stops.
+
+    Google's keyless endpoint is undocumented and its multi-waypoint response
+    shape is not something to depend on, so each consecutive pair is requested
+    as its own leg and the legs are stitched together. Predictable, at the cost
+    of one request per leg.
+    """
+    legs = [_google_directions_route(a, b) for a, b in zip(stops, stops[1:])]
+
+    coordinates = []
+    waypoints = []
+    total_km = 0.0
+    total_min = 0.0
+
+    for index, leg in enumerate(legs):
+        leg_coords = leg["coordinates"]
+        # The end of one leg and the start of the next are the same place.
+        if coordinates and leg_coords and coordinates[-1] == leg_coords[0]:
+            leg_coords = leg_coords[1:]
+        coordinates.extend(leg_coords)
+        total_km += leg["distance_km"]
+        total_min += leg["duration_min"]
+        if index == 0:
+            waypoints.append({"lat": leg["origin"]["lat"], "lng": leg["origin"]["lon"]})
+        waypoints.append({"lat": leg["destination"]["lat"], "lng": leg["destination"]["lon"]})
+
+    first, last = legs[0], legs[-1]
+    if len(legs) == 1:
+        route_name = first["route_name"]
+    else:
+        route_name = f"{first['origin']['name']} → {last['destination']['name']} via {len(legs) - 1} stop(s)"
+
+    return {
+        "provider": "google",
+        "route_name": route_name,
+        "origin": first["origin"],
+        "destination": last["destination"],
+        "stops": [leg["origin"] for leg in legs] + [last["destination"]],
+        "waypoints": waypoints,
+        "coordinates": coordinates,
+        "distance_km": round(total_km, 2),
+        "duration_min": round(total_min, 1),
+        "legs": len(legs),
+    }
+
+
+def _circle_route(lat, lon, radius_m, points=48, clockwise=True):
+    """Build a closed ring around a point. Pure geometry — no device, no network,
+    so a circle can be laid out before the phone is even connected."""
+    earth_radius_m = 6371000.0
+    lat_rad = math.radians(lat)
+    coordinates = []
+    waypoints = []
+
+    for index in range(points + 1):
+        angle = 2 * math.pi * (index / points)
+        if not clockwise:
+            angle = -angle
+        # Start at due north so the path begins at the top of the circle.
+        d_lat = (radius_m * math.cos(angle)) / earth_radius_m
+        d_lon = (radius_m * math.sin(angle)) / (earth_radius_m * math.cos(lat_rad))
+        point_lat = lat + math.degrees(d_lat)
+        point_lon = lon + math.degrees(d_lon)
+        coordinates.append([point_lon, point_lat])
+        waypoints.append({"lat": point_lat, "lng": point_lon})
+
+    return {
+        "provider": "circle",
+        "route_name": f"{int(round(radius_m))} m circle",
+        "origin": {"name": "Circle start", "lat": waypoints[0]["lat"], "lon": waypoints[0]["lng"]},
+        "destination": {"name": "Circle start", "lat": waypoints[-1]["lat"], "lon": waypoints[-1]["lng"]},
+        "waypoints": waypoints,
+        "coordinates": coordinates,
+        "distance_km": round(2 * math.pi * radius_m / 1000, 2),
+        "duration_min": None,
+        "center": {"lat": lat, "lon": lon},
+        "radius_m": radius_m,
+    }
+
+
 @app.route("/api/route/calculate", methods=["POST"])
 def api_route_calculate():
     data = request.json or {}
-    origin = str(data.get("origin", "")).strip()
-    destination = str(data.get("destination", "")).strip()
-    if not origin or not destination:
-        return jsonify({"error": "Enter both a start and destination address"}), 400
-    if len(origin) > 200 or len(destination) > 200:
+
+    # Preferred form is a list of stops; origin/destination is still accepted.
+    stops = data.get("stops")
+    if not isinstance(stops, list):
+        stops = [data.get("origin", ""), data.get("destination", "")]
+    stops = [str(stop).strip() for stop in stops]
+    stops = [stop for stop in stops if stop]
+
+    if len(stops) < 2:
+        return jsonify({"error": "Enter at least a start and a destination"}), 400
+    if len(stops) > 10:
+        return jsonify({"error": "A route can have at most 10 stops"}), 400
+    if any(len(stop) > 200 for stop in stops):
         return jsonify({"error": "Address is too long"}), 400
+
+    if not _search_allowed():
+        return jsonify({"error": "Too many requests, slow down"}), 429
+
     try:
-        return jsonify(_google_directions_route(origin, destination))
+        return jsonify(_google_multi_stop_route(stops))
     except (ValueError, json.JSONDecodeError) as exc:
         return jsonify({"error": str(exc)}), 400
     except http_requests.RequestException:
         return jsonify({"error": "Google Maps route service is unavailable"}), 502
+
+
+@app.route("/api/route/circle", methods=["POST"])
+def api_route_circle():
+    data = request.json or {}
+    try:
+        lat = float(data["lat"])
+        lon = float(data["lon"])
+        radius = float(data.get("radius", 200))
+        points = int(data.get("points", 48))
+    except (KeyError, TypeError, ValueError):
+        return jsonify({"error": "A centre point and radius are required"}), 400
+
+    if not (-90 <= lat <= 90 and -180 <= lon <= 180):
+        return jsonify({"error": "Centre point is out of range"}), 400
+    if not (5 <= radius <= 50000):
+        return jsonify({"error": "Radius must be between 5 m and 50 km"}), 400
+    points = max(8, min(360, points))
+
+    return jsonify(_circle_route(lat, lon, radius, points, bool(data.get("clockwise", True))))
 
 
 @app.route("/api/route/start", methods=["POST"])

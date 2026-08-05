@@ -180,8 +180,23 @@ document.addEventListener("DOMContentLoaded", async () => {
     $("btn-route-resume").addEventListener("click", resumeRoute);
     $("btn-route-clear").addEventListener("click", clearRoutePoints);
     $("btn-route-calculate").addEventListener("click", calculateAddressRoute);
-    $("route-origin").addEventListener("keydown", e => { if (e.key === "Enter") calculateAddressRoute(); });
-    $("route-destination").addEventListener("keydown", e => { if (e.key === "Enter") calculateAddressRoute(); });
+    $("btn-add-stop").addEventListener("click", addStop);
+    $("btn-swap-stops").addEventListener("click", reverseStops);
+    document.querySelectorAll(".mode-tab").forEach(tab => {
+        tab.addEventListener("click", () => setBuildMode(tab.dataset.build));
+    });
+    renderStops();
+
+    attachAutocomplete($("circle-center"), $("ac-circle-center"), place => { circlePlace = place; });
+    $("circle-center").addEventListener("input", () => { circlePlace = null; });
+    $("btn-circle-build").addEventListener("click", buildCircleRoute);
+    $("btn-circle-here").addEventListener("click", () => {
+        if (!marker) return toast("Click the map to place a marker first", "error");
+        const point = marker.getLatLng();
+        circlePlace = { lat: point.lat, lon: point.lng };
+        $("circle-center").value = point.lat.toFixed(6) + ", " + point.lng.toFixed(6);
+        toast("Centre set to the current marker");
+    });
     $("btn-layer").addEventListener("click", toggleTiles);
     $("btn-my-location").addEventListener("click", goToUserLocation);
     $("btn-zoom-in").addEventListener("click", () => map.zoomIn());
@@ -653,34 +668,243 @@ function addRoutePoint(lat, lng, preserveCalculated = false) { if (!preserveCalc
 function clearRoutePoints() { routePoints = []; calculatedRouteCoordinates = null; calculatedRouteProvider = null; routeMarkers.forEach(m => map.removeLayer(m)); routeMarkers = []; if (routeLine) { map.removeLayer(routeLine); routeLine = null; } if (routeDisplayLine) { map.removeLayer(routeDisplayLine); routeDisplayLine = null; } if (routeTraveledLine) { map.removeLayer(routeTraveledLine); routeTraveledLine = null; } const addressStatus = $("route-address-status"); if (addressStatus) { addressStatus.textContent = ""; addressStatus.className = "route-address-status"; } updateRouteUI(); $("route-progress").classList.add("hidden"); }
 function updateRouteUI() { $("btn-route-start").disabled = routePoints.length < 2; $("route-hint").textContent = routePoints.length > 0 ? routePoints.length + " point" + (routePoints.length > 1 ? "s" : "") + " \u2014 shift+click to add more" : "Shift+click map to add route points"; }
 
-async function calculateAddressRoute() {
-    const origin = $("route-origin").value.trim();
-    const destination = $("route-destination").value.trim();
+// ── Address autocomplete ─────────────────────────────────────
+// The top-bar search already resolves places; route fields deserve the same
+// rather than making people type an address exactly right and hope.
+
+function attachAutocomplete(input, resultsEl, onPick) {
+    let timer = null, items = [], cursor = -1, controller = null;
+
+    const close = () => { resultsEl.classList.remove("visible"); cursor = -1; };
+
+    const render = () => {
+        resultsEl.textContent = "";
+        if (!items.length) {
+            const empty = document.createElement("div");
+            empty.className = "ac-empty";
+            empty.textContent = "No matches";
+            resultsEl.appendChild(empty);
+        } else {
+            items.forEach((place, index) => {
+                const row = document.createElement("div");
+                row.className = "ac-item" + (index === cursor ? " highlighted" : "");
+                row.textContent = place.name || place.display_name;
+                if (place.subtitle) {
+                    const sub = document.createElement("small");
+                    sub.textContent = place.subtitle;
+                    row.appendChild(sub);
+                }
+                row.addEventListener("mousedown", event => {
+                    event.preventDefault();
+                    input.value = place.name || place.display_name;
+                    close();
+                    if (onPick) onPick(place);
+                });
+                resultsEl.appendChild(row);
+            });
+        }
+        resultsEl.classList.add("visible");
+    };
+
+    const search = async query => {
+        if (controller) controller.abort();
+        controller = new AbortController();
+        const centre = map ? map.getCenter() : null;
+        const params = new URLSearchParams({ q: query });
+        if (centre) { params.set("lat", centre.lat); params.set("lon", centre.lng); params.set("zoom", map.getZoom()); }
+        try {
+            const response = await fetch("/api/search?" + params, { signal: controller.signal });
+            if (!response.ok) return close();
+            const data = await response.json();
+            items = Array.isArray(data) ? data.slice(0, 6) : [];
+            cursor = -1;
+            render();
+        } catch (error) { /* aborted or offline */ }
+    };
+
+    input.addEventListener("input", () => {
+        clearTimeout(timer);
+        const query = input.value.trim();
+        if (query.length < 3) return close();
+        timer = setTimeout(() => search(query), 220);
+    });
+
+    input.addEventListener("keydown", event => {
+        if (!resultsEl.classList.contains("visible")) return;
+        if (event.key === "ArrowDown") { event.preventDefault(); cursor = Math.min(cursor + 1, items.length - 1); render(); }
+        else if (event.key === "ArrowUp") { event.preventDefault(); cursor = Math.max(cursor - 1, 0); render(); }
+        else if (event.key === "Enter" && cursor >= 0) {
+            event.preventDefault();
+            const place = items[cursor];
+            input.value = place.name || place.display_name;
+            close();
+            if (onPick) onPick(place);
+        } else if (event.key === "Escape") { close(); }
+    });
+
+    input.addEventListener("blur", () => setTimeout(close, 120));
+}
+
+// ── Multi-stop builder ───────────────────────────────────────
+
+let routeStops = [{ text: "", place: null }, { text: "", place: null }];
+
+function stopLabel(index) {
+    if (index === 0) return "A";
+    if (index === routeStops.length - 1) return "B";
+    return String(index);
+}
+
+function renderStops() {
+    const list = $("stop-list");
+    if (!list) return;
+    list.textContent = "";
+
+    routeStops.forEach((stop, index) => {
+        const row = document.createElement("div");
+        row.className = "stop-row" + (index === 0 ? " is-start" : (index === routeStops.length - 1 ? " is-end" : ""));
+
+        const marker = document.createElement("span");
+        marker.className = "stop-marker";
+        marker.setAttribute("aria-hidden", "true");
+        marker.textContent = stopLabel(index);
+        row.appendChild(marker);
+
+        const field = document.createElement("div");
+        field.className = "stop-field";
+        const input = document.createElement("input");
+        input.type = "text";
+        input.className = "route-address-input";
+        input.autocomplete = "off";
+        input.value = stop.text;
+        input.placeholder = index === 0 ? "Start address or place"
+            : (index === routeStops.length - 1 ? "Destination address or place" : "Stop " + index);
+        input.setAttribute("aria-label", input.placeholder);
+        input.addEventListener("input", () => { routeStops[index].text = input.value; routeStops[index].place = null; });
+        field.appendChild(input);
+
+        const results = document.createElement("div");
+        results.className = "ac-results";
+        field.appendChild(results);
+        row.appendChild(field);
+
+        attachAutocomplete(input, results, place => {
+            routeStops[index].text = input.value;
+            routeStops[index].place = place;
+        });
+
+        const remove = document.createElement("button");
+        remove.className = "stop-remove";
+        remove.textContent = "×";
+        remove.setAttribute("aria-label", "Remove this stop");
+        remove.disabled = routeStops.length <= 2;
+        remove.addEventListener("click", () => { routeStops.splice(index, 1); renderStops(); });
+        row.appendChild(remove);
+
+        list.appendChild(row);
+    });
+}
+
+function addStop() {
+    if (routeStops.length >= 10) return toast("A route can have at most 10 stops", "error");
+    // New stops go before the destination, which is what "add a stop" means.
+    routeStops.splice(routeStops.length - 1, 0, { text: "", place: null });
+    renderStops();
+}
+
+function reverseStops() { routeStops.reverse(); renderStops(); }
+
+function setBuildMode(mode) {
+    document.querySelectorAll(".mode-tab").forEach(tab => {
+        const on = tab.dataset.build === mode;
+        tab.classList.toggle("active", on);
+        tab.setAttribute("aria-selected", on ? "true" : "false");
+    });
+    document.querySelectorAll(".build-pane").forEach(pane => {
+        pane.classList.toggle("active", pane.id === "build-" + mode);
+    });
+}
+
+function drawCalculatedRoute(data, label) {
+    clearRoutePoints();
+    // A circle is 49 waypoints; numbering every one of them buries the map in
+    // markers. Past a handful, the line alone communicates the shape.
+    if (data.waypoints.length > 12) {
+        routePoints = data.waypoints.map(point => ({ lat: point.lat, lng: point.lng }));
+    } else {
+        data.waypoints.forEach(point => addRoutePoint(point.lat, point.lng, true));
+    }
+    calculatedRouteCoordinates = data.coordinates;
+    calculatedRouteProvider = data.provider;
+    routeDistanceKm = data.distance_km;
+    if (routeLine) { map.removeLayer(routeLine); routeLine = null; }
+    routeDisplayLine = L.polyline(data.coordinates.map(c => [c[1], c[0]]), { color: "#6F999A", weight: 3, opacity: 0.78 }).addTo(map);
+    map.fitBounds(routeDisplayLine.getBounds(), { padding: [35, 35] });
+    updateRouteUI();
+    // After updateRouteUI, which writes its own generic hint.
+    $("route-hint").textContent = label;
+}
+
+async function buildCircleRoute() {
     const status = $("route-address-status");
-    if (!origin || !destination) return toast("Enter both route addresses", "error");
+    const button = $("btn-circle-build");
+    const radius = parseFloat($("circle-radius").value);
+    const centre = circleCentre();
+    if (!centre) return toast("Pick a centre point first", "error");
+    if (!(radius >= 5)) return toast("Enter a radius of at least 5 m", "error");
+
+    button.disabled = true;
+    status.classList.remove("hidden");
+    status.className = "route-address-status loading";
+    status.textContent = "Building circle…";
+    try {
+        const response = await fetch("/api/route/circle", {
+            method: "POST", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ lat: centre.lat, lon: centre.lon, radius, clockwise: !$("circle-ccw").checked })
+        });
+        const data = await response.json();
+        if (!response.ok) { status.className = "route-address-status error"; status.textContent = data.error || "Could not build the circle"; return toast(status.textContent, "error"); }
+        drawCalculatedRoute(data, "Circle ready");
+        status.className = "route-address-status success";
+        status.textContent = data.route_name + " · " + data.distance_km + " km around";
+        toast("Circle route ready");
+    } catch (error) {
+        status.className = "route-address-status error";
+        status.textContent = "Could not build the circle";
+    } finally { button.disabled = false; }
+}
+
+let circlePlace = null;
+function circleCentre() {
+    if (circlePlace) return { lat: circlePlace.lat, lon: circlePlace.lon };
+    if (marker) { const p = marker.getLatLng(); return { lat: p.lat, lon: p.lng }; }
+    return null;
+}
+
+async function calculateAddressRoute() {
+    const status = $("route-address-status");
+    const stops = routeStops.map(stop => stop.text.trim()).filter(Boolean);
+    if (stops.length < 2) return toast("Enter at least a start and a destination", "error");
     const button = $("btn-route-calculate");
     button.disabled = true; button.textContent = "Calculating…";
-    status.className = "route-address-status"; status.textContent = "Asking Google Maps for the driving route…";
+    status.classList.remove("hidden");
+    status.className = "route-address-status loading";
+    status.textContent = stops.length > 2
+        ? "Asking Google Maps for a route through " + stops.length + " stops…"
+        : "Asking Google Maps for the driving route…";
     try {
-        const response = await fetch("/api/route/calculate", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ origin, destination }) });
+        const response = await fetch("/api/route/calculate", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ stops }) });
         const data = await response.json();
         if (!response.ok) { status.className = "route-address-status error"; status.textContent = data.error || "Route calculation failed"; return toast(status.textContent, "error"); }
-        clearRoutePoints();
-        data.waypoints.forEach(point => addRoutePoint(point.lat, point.lng, true));
-        calculatedRouteCoordinates = data.coordinates;
-        calculatedRouteProvider = data.provider;
-        routeDistanceKm = data.distance_km;
-        if (routeLine) { map.removeLayer(routeLine); routeLine = null; }
-        routeDisplayLine = L.polyline(data.coordinates.map(c => [c[1], c[0]]), { color: "#6F999A", weight: 3, opacity: 0.78 }).addTo(map);
-        map.fitBounds(routeDisplayLine.getBounds(), { padding: [35, 35] });
+        drawCalculatedRoute(data, data.legs > 1 ? data.legs + " legs ready" : "Google route ready");
         const miles = data.distance_km * 0.621371;
+        status.className = "route-address-status success";
         status.textContent = "Google · " + miles.toFixed(1) + " mi · " + data.duration_min + " min · " + data.route_name;
-        $("route-hint").textContent = "Google route ready";
-        toast("Google Maps route calculated");
+        toast("Route calculated");
     } catch (error) {
         status.className = "route-address-status error"; status.textContent = "Google Maps route service is unavailable"; toast(status.textContent, "error");
     } finally {
-        button.disabled = false; button.textContent = "Calculate with Google Maps";
+        button.disabled = false; button.textContent = "Calculate route";
     }
 }
 

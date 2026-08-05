@@ -762,7 +762,7 @@ body {
 
 /* ═══ Buttons ═══════════════════════════════════════════════════ */
 
-.btn-group { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.btn-group { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; flex-shrink: 0; }
 
 .btn {
     display: inline-flex;
@@ -785,7 +785,6 @@ body {
 
 /* Primary. The accent lives here. */
 .btn-blue {
-    flex: 1;
     background: var(--accent);
     color: var(--accent-ink);
     font-weight: 600;
@@ -808,7 +807,10 @@ body {
 }
 .btn-red:not(:disabled):hover { background: var(--danger); color: var(--accent-ink); }
 
-.btn-xs { height: 26px; padding: 0 9px; font-size: var(--t-meta); flex: 1; }
+.btn-xs { height: 26px; padding: 0 9px; font-size: var(--t-meta); }
+
+/* Only stretch to fill when buttons are laid out in a row together. */
+.btn-group > .btn { flex: 1 1 auto; }
 
 .btn-loading { position: relative; color: transparent !important; pointer-events: none; }
 .btn-loading::after {
@@ -1063,6 +1065,105 @@ body {
 
 /* ── Route builder ───────────────────────────────────────────── */
 
+.mode-tabs {
+    display: flex;
+    gap: 2px;
+    padding: 3px;
+    background: var(--surface-sunken);
+    border-radius: var(--r-sm);
+}
+.mode-tab {
+    flex: 1;
+    background: none;
+    border: none;
+    border-radius: var(--r-xs);
+    color: var(--text-tertiary);
+    font-family: var(--font);
+    font-size: var(--t-meta);
+    font-weight: 500;
+    padding: 5px 0;
+    cursor: pointer;
+    transition: all var(--dur) var(--ease);
+}
+.mode-tab:hover { color: var(--text); }
+.mode-tab.active { background: var(--surface-raised); color: var(--text); font-weight: 600; }
+
+.build-pane { display: none; flex-direction: column; gap: 6px; }
+.build-pane > *, .tab-content > *, .panel-section > * { flex-shrink: 0; }
+.build-pane.active { display: flex; }
+
+/* Stops read as an itinerary: a marker column, then the address. */
+.stop-list { display: flex; flex-direction: column; gap: 5px; }
+
+.stop-row { display: flex; align-items: center; gap: 7px; }
+
+.stop-marker {
+    flex-shrink: 0;
+    width: 17px;
+    text-align: center;
+    font-size: var(--t-meta);
+    font-weight: 700;
+    color: var(--text-tertiary);
+    font-variant-numeric: tabular-nums;
+}
+.stop-row.is-start .stop-marker { color: var(--live); }
+.stop-row.is-end .stop-marker { color: var(--accent); }
+
+.stop-field { position: relative; flex: 1; min-width: 0; }
+.stop-field .route-address-input { width: 100%; }
+
+.stop-remove {
+    flex-shrink: 0;
+    width: 22px; height: 22px;
+    display: grid; place-items: center;
+    background: none;
+    border: none;
+    border-radius: var(--r-xs);
+    color: var(--text-tertiary);
+    font-size: 15px;
+    line-height: 1;
+    cursor: pointer;
+    transition: all var(--dur) var(--ease);
+}
+.stop-remove:hover { background: var(--danger-bg); color: var(--danger); }
+.stop-remove:disabled { opacity: 0.25; cursor: not-allowed; }
+
+/* Address autocomplete, anchored under whichever field asked for it. */
+.ac-results {
+    position: absolute;
+    top: calc(100% + 4px); left: 0; right: 0;
+    max-height: 220px;
+    overflow-y: auto;
+    background: var(--surface-solid);
+    border: 1px solid var(--border);
+    border-radius: var(--r-sm);
+    box-shadow: var(--shadow-pop);
+    z-index: 1200;
+    padding: 3px;
+    display: none;
+}
+.ac-results.visible { display: block; }
+
+.ac-item {
+    padding: 6px 8px;
+    border-radius: var(--r-xs);
+    cursor: pointer;
+    font-size: var(--t-sm);
+    color: var(--text);
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.ac-item:hover, .ac-item.highlighted { background: var(--surface-hover); }
+.ac-item small {
+    display: block;
+    font-size: var(--t-label);
+    color: var(--text-tertiary);
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.ac-empty { padding: 9px; text-align: center; font-size: var(--t-meta); color: var(--text-tertiary); }
+
+.field-row { display: flex; align-items: center; gap: 7px; flex-wrap: wrap; }
+.field-row label { font-size: var(--t-meta); color: var(--text-secondary); }
+
 .address-route-builder { display: flex; flex-direction: column; gap: 5px; }
 
 .route-address-status {
@@ -1221,13 +1322,15 @@ body {
 }
 .leaflet-control-attribution a { color: var(--text-secondary) !important; }
 
+/* Sit clear of the right-hand panel rather than on top of it. The panel is
+   fixed at right:12px and is --panel-w wide, so the controls start beyond it. */
 #map-controls {
     position: fixed;
-    right: 12px;
-    bottom: 56px;
+    right: calc(var(--panel-w) + 24px);
+    bottom: 12px;
     z-index: 800;
     display: flex;
-    flex-direction: column;
+    flex-direction: row;
     gap: 5px;
 }
 
@@ -1654,4 +1757,7 @@ kbd {
     .brand-lockup span { display: none; }
     #status-bar { max-width: calc(100vw - 24px); overflow-x: auto; }
     #coord-hud { display: none; }
+    /* Panels are full width here, so the offset above would push these off
+       screen. Park them bottom-right over the map instead. */
+    #map-controls { right: 12px; bottom: 60px; }
 }

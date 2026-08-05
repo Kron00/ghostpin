@@ -289,46 +289,92 @@
         <button class="hud-panel-close" data-panel="panel-movement" aria-label="Collapse movement panel">&times;</button>
     </div>
     <div class="hud-panel-body">
-        <div class="speed-segment">
-            <button class="seg-btn" data-speed="5">Walk</button>
-            <button class="seg-btn active" data-speed="15">Bike</button>
-            <button class="seg-btn" data-speed="40">Drive</button>
-            <div class="seg-custom">
-                <input type="number" id="speed-input" value="15" min="1" max="300" step="0.1" aria-label="Movement speed" />
-                <button id="speed-unit-toggle" class="speed-unit-toggle" type="button" title="Switch speed units to miles per hour">km/h</button>
+        <div class="panel-section">
+            <div class="panel-section-title"><span>Speed</span></div>
+            <div class="speed-segment">
+                <button class="seg-btn" data-speed="5">Walk</button>
+                <button class="seg-btn active" data-speed="15">Bike</button>
+                <button class="seg-btn" data-speed="40">Drive</button>
+                <div class="seg-custom">
+                    <input type="number" id="speed-input" value="15" min="1" max="300" step="0.1" aria-label="Movement speed" />
+                    <button id="speed-unit-toggle" class="speed-unit-toggle" type="button" title="Switch speed units to miles per hour">km/h</button>
+                </div>
             </div>
         </div>
-        <div class="address-route-builder">
-            <input type="text" id="route-origin" class="route-address-input" placeholder="Start address" autocomplete="off" />
-            <input type="text" id="route-destination" class="route-address-input" placeholder="Destination address" autocomplete="off" />
-            <button id="btn-route-calculate" class="btn btn-ghost btn-xs">Calculate with Google Maps</button>
+        <!-- How the route gets built: by address, by circle, or by map clicks -->
+        <div class="panel-section">
+            <div class="panel-section-title"><span>Build a route</span></div>
+            <div class="mode-tabs" role="tablist" aria-label="Route builder">
+                <button class="mode-tab active" data-build="stops" role="tab" aria-selected="true">Stops</button>
+                <button class="mode-tab" data-build="circle" role="tab" aria-selected="false">Circle</button>
+                <button class="mode-tab" data-build="map" role="tab" aria-selected="false">Map</button>
+            </div>
+
+            <!-- Stops: any number of addresses, each with search -->
+            <div class="build-pane active" id="build-stops">
+                <div id="stop-list" class="stop-list"></div>
+                <div class="btn-group">
+                    <button id="btn-add-stop" class="btn btn-ghost btn-xs">+ Add stop</button>
+                    <button id="btn-swap-stops" class="btn btn-ghost btn-xs" title="Reverse the order of the stops">Reverse</button>
+                </div>
+                <button id="btn-route-calculate" class="btn btn-blue btn-xs">Calculate route</button>
+            </div>
+
+            <!-- Circle: centre plus radius -->
+            <div class="build-pane" id="build-circle">
+                <div class="stop-row">
+                    <span class="stop-marker" aria-hidden="true">◎</span>
+                    <div class="stop-field">
+                        <input type="text" id="circle-center" class="route-address-input" placeholder="Centre address or place" autocomplete="off" />
+                        <div class="ac-results" id="ac-circle-center"></div>
+                    </div>
+                </div>
+                <button id="btn-circle-here" class="btn-inline">Use the current marker as the centre</button>
+                <div class="field-row">
+                    <label for="circle-radius">Radius</label>
+                    <input type="number" id="circle-radius" class="wander-input" value="500" min="5" max="50000" step="10" />
+                    <span class="hint">m</span>
+                    <label class="check-label"><input type="checkbox" id="circle-ccw" /> Anticlockwise</label>
+                </div>
+                <button id="btn-circle-build" class="btn btn-blue btn-xs">Build circle</button>
+            </div>
+
+            <!-- Map: the original shift+click flow -->
+            <div class="build-pane" id="build-map">
+                <p class="hint">Shift-click the map to drop route points in order. Click <strong>Clear</strong> to start over.</p>
+            </div>
+
             <div id="route-address-status" class="route-address-status hidden"></div>
+            <p class="hint" id="route-hint">Shift+click map to add route points</p>
         </div>
-        <p class="hint" id="route-hint">Shift+click map to add route points</p>
-        <div class="route-options">
-            <select id="route-mode">
-                <option value="once">Once</option>
-                <option value="loop">Loop</option>
-                <option value="pingpong">Ping-Pong</option>
-            </select>
-            <label class="check-label"><input type="checkbox" id="speed-randomize" /> Randomize</label>
-            <label class="check-label"><input type="checkbox" id="follow-mode" /> Follow</label>
-        </div>
-        <div class="btn-group">
-            <button id="btn-route-start" class="btn btn-blue" disabled>Start</button>
-            <button id="btn-route-pause" class="btn btn-ghost hidden">Pause</button>
-            <button id="btn-route-resume" class="btn btn-blue hidden">Resume</button>
-            <button id="btn-route-stop" class="btn btn-red" disabled>Stop</button>
-            <button id="btn-route-clear" class="btn btn-ghost">Clear</button>
-        </div>
-        <div id="route-progress" class="route-progress hidden">
-            <div class="progress-track"><div id="progress-bar" class="progress-bar"></div></div>
-            <span id="route-pct">0%</span>
-        </div>
-        <div class="btn-group">
-            <button id="btn-gpx-import" class="btn btn-ghost btn-xs">Import GPX</button>
-            <button id="btn-gpx-export" class="btn btn-ghost btn-xs">Export GPX</button>
-            <input type="file" id="gpx-file" accept=".gpx" class="hidden" />
+
+        <div class="panel-section">
+            <div class="panel-section-title"><span>Playback</span></div>
+            <div class="route-options">
+                <select id="route-mode" aria-label="Route repeat mode">
+                    <option value="once">Once</option>
+                    <option value="loop">Loop</option>
+                    <option value="pingpong">Ping-Pong</option>
+                </select>
+                <label class="check-label"><input type="checkbox" id="speed-randomize" /> Randomize</label>
+                <label class="check-label"><input type="checkbox" id="follow-mode" /> Follow</label>
+            </div>
+            <div class="btn-group">
+                <button id="btn-route-start" class="btn btn-blue" disabled>Start</button>
+                <button id="btn-route-pause" class="btn btn-ghost hidden">Pause</button>
+                <button id="btn-route-resume" class="btn btn-blue hidden">Resume</button>
+                <button id="btn-route-stop" class="btn btn-red" disabled>Stop</button>
+                <button id="btn-route-clear" class="btn btn-ghost">Clear</button>
+            </div>
+            <div id="route-progress" class="route-progress hidden">
+                <div class="progress-track"><div id="progress-bar" class="progress-bar"></div></div>
+                <span id="route-pct">0%</span>
+            </div>
+            <div class="btn-group">
+                <button id="btn-gpx-import" class="btn btn-ghost btn-xs">Import GPX</button>
+                <button id="btn-gpx-export" class="btn btn-ghost btn-xs">Export GPX</button>
+                <input type="file" id="gpx-file" accept=".gpx" class="hidden" />
+            </div>
         </div>
         <!-- Joystick -->
         <div class="panel-section">
