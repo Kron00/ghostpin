@@ -587,8 +587,28 @@ class LocationService:
 
     # ── GPX import / export ────────────────────────────────
 
+    # A GPX file is untrusted input. ElementTree will not fetch external
+    # entities, but it does expand internal ones, so a small file can still
+    # balloon into gigabytes of memory on import.
+    MAX_GPX_BYTES = 16 * 1024 * 1024
+    MAX_GPX_WAYPOINTS = 100_000
+
     def import_gpx(self, gpx_content):
         """Parse GPX XML and return waypoints [{lat, lng, name?}]."""
+        size = len(gpx_content.encode("utf-8", "ignore")
+                   if isinstance(gpx_content, str) else gpx_content)
+        if size > self.MAX_GPX_BYTES:
+            raise ValueError(
+                f"GPX file is too large ({size // (1024 * 1024)} MB); "
+                f"the limit is {self.MAX_GPX_BYTES // (1024 * 1024)} MB"
+            )
+
+        probe = gpx_content[:4096]
+        if isinstance(probe, bytes):
+            probe = probe.decode("utf-8", "ignore")
+        if "<!DOCTYPE" in probe.upper() or "<!ENTITY" in probe.upper():
+            raise ValueError("GPX file declares a DOCTYPE or entity, which is not allowed")
+
         root = ET.fromstring(gpx_content)
         ns = {"gpx": "http://www.topografix.com/GPX/1/1"}
         waypoints = []
@@ -611,7 +631,11 @@ class LocationService:
             for wpt in root.findall(".//gpx:wpt", ns) or root.findall(".//{http://www.topografix.com/GPX/1/0}wpt"):
                 lat = float(wpt.get("lat"))
                 lon = float(wpt.get("lon"))
-                name_el = wpt.find("gpx:name", ns) or wpt.find("{http://www.topografix.com/GPX/1/0}name")
+                # An Element with no children is falsy, so `or` would discard a
+                # perfectly good <name> here. Test for None explicitly.
+                name_el = wpt.find("gpx:name", ns)
+                if name_el is None:
+                    name_el = wpt.find("{http://www.topografix.com/GPX/1/0}name")
                 name = name_el.text if name_el is not None else None
                 waypoints.append({"lat": lat, "lng": lon, "name": name})
 
@@ -627,6 +651,9 @@ class LocationService:
 
         if not waypoints:
             raise ValueError("No waypoints found in GPX file")
+
+        if len(waypoints) > self.MAX_GPX_WAYPOINTS:
+            waypoints = waypoints[:self.MAX_GPX_WAYPOINTS]
 
         return {"waypoints": waypoints, "count": len(waypoints)}
 

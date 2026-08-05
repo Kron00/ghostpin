@@ -47,7 +47,17 @@ def _get_tunneld_command():
 def _log_path():
     if IS_WINDOWS:
         return os.path.join(tempfile.gettempdir(), "ghostpin-tunneld.log")
-    return "/tmp/ghostpin-tunneld.log"
+    # Writing to a fixed path in world-writable /tmp lets a local attacker
+    # pre-create the name as a symlink and have the root shell truncate
+    # whatever it points at. Keep the log inside the user's own directory.
+    log_dir = os.path.join(
+        os.path.expanduser("~"), "Library", "Application Support", "Ghostpin"
+    )
+    try:
+        os.makedirs(log_dir, mode=0o700, exist_ok=True)
+    except OSError:
+        return os.path.join(tempfile.mkdtemp(prefix="ghostpin-"), "tunneld.log")
+    return os.path.join(log_dir, "tunneld.log")
 
 
 def start_tunneld_with_admin():
@@ -95,8 +105,13 @@ def _start_windows(exe, args, log):
 
     try:
         # Start-Process with -Verb RunAs triggers UAC
+        # Resolve cmd.exe absolutely so a planted cmd.exe earlier on PATH or in
+        # the working directory cannot be the thing the user elevates.
+        cmd_exe = os.path.join(
+            os.environ.get("SystemRoot", r"C:\Windows"), "System32", "cmd.exe"
+        )
         ps_cmd = (
-            f'Start-Process -FilePath "cmd.exe" '
+            f'Start-Process -FilePath "{cmd_exe}" '
             f'-ArgumentList "/c","{wrapper}" '
             f'-Verb RunAs -WindowStyle Hidden'
         )

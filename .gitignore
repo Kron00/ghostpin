@@ -25,7 +25,9 @@ saved_locations.json
 profiles.json
 schedules.json
 routes.json
+history.json
 .tunneld.log
+tunneld.log
 *.log
 
 # Test evidence — screenshots of real devices, never commit

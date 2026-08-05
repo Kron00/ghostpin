@@ -17,6 +17,12 @@ PORT = 8080
 
 app = Flask(__name__)
 
+# Binding to loopback does not stop a hostile page from reaching the API: a
+# domain that resolves to 127.0.0.1 makes the browser treat these endpoints as
+# same-origin, which would expose the UDID, current location, and saved history
+# through plain GETs. Rejecting unexpected Host headers closes that off.
+app.config["TRUSTED_HOSTS"] = ["127.0.0.1", "localhost"]
+
 # The API is unauthenticated because it only ever binds to 127.0.0.1. That still
 # leaves it reachable by any page open in a browser on this machine, which can
 # submit a cross-origin form POST to endpoints that take no body. Rejecting

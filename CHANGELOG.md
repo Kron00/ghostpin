@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- GPX waypoint names were always discarded on import. An `Element` with no
+  children is falsy, so the fallback `or` in the namespace lookup threw away a
+  valid `<name>`.
+
+### Security
+
+- Reject requests carrying an unexpected `Host` header. Binding to loopback does
+  not stop a hostile page: a domain resolving to `127.0.0.1` makes the browser
+  treat the API as same-origin, which exposed the UDID, current location, and
+  saved history over plain GETs.
+- Reject cross-origin writes. Any page open in the browser could previously
+  submit a form POST to endpoints that take no body, resetting a spoof or
+  triggering a device reconnect.
+- Refuse GPX files that declare a `DOCTYPE` or entity, and cap imports at 16 MB
+  and 100,000 waypoints. ElementTree expands internal entities, so a small file
+  could otherwise exhaust memory on import.
+- Write the privileged tunnel log inside the user's own support directory rather
+  than a fixed path in world-writable `/tmp`, where it could be pre-created as a
+  symlink and truncated by the root shell.
+- Resolve `cmd.exe` by absolute path in the Windows elevation helper, so a
+  planted `cmd.exe` earlier on `PATH` cannot be what the user elevates.
+
 ## [2.0.0] — 2026-08-05
 
 First public release under the Ghostpin name. This is a rebrand and substantial
