@@ -7,8 +7,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Rebuilt the interface on a single design system. The coordinate readout is now
+  the anchor of the Location panel — tabular monospaced figures on an instrument
+  face — and the accent colour is reserved almost entirely for Warp, so the
+  primary action no longer looks identical to Reset, Undo, and Save.
+- Replaced the stacks of hairline dividers and inline-styled rows in the panels
+  with labelled sections, and grouped the floating status pills into one status
+  strip.
+- Rewrote the light theme. It is now a token-level override and nothing else,
+  which is what makes it maintainable; the previous version re-declared
+  component rules and drifted into near-illegible pale grey on cream.
+- Panels stack and scroll in document order below 940px instead of overlapping.
+
 ### Fixed
 
+- The light theme was effectively unreadable: most text sat between 1:1 and 3:1
+  against its background. Every visible text element now meets WCAG AA (4.5:1)
+  in both themes, verified by measuring composited colours in the browser.
+- Panel contents could overlap each other. The panel body is a height-capped
+  flex column, so its children shrank below their own content — the coordinate
+  readout was drawn on top of the latitude field.
+- The Places panel ran off the bottom of the window; it now takes the space left
+  under the Location panel and scrolls within it.
+- Removed the nested scroll region inside the Places panel.
+- Icon-only controls, the map, and the toast region had no accessible names.
 - GPX waypoint names were always discarded on import. An `Element` with no
   children is falsy, so the fallback `or` in the namespace lookup threw away a
   valid `<name>`.

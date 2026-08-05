@@ -255,12 +255,19 @@ document.addEventListener("DOMContentLoaded", async () => {
     restorePanelStates();
 
     // Position Places panel
+    // Places sits under Location in the left column. Both are fixed-position,
+    // so nothing stops the second one running off the bottom of the screen —
+    // give it whatever room is left and let its body scroll inside that.
     function positionPlacesPanel() {
         const loc = $("panel-location"), places = $("panel-places");
-        if (loc && places) { places.style.top = (loc.getBoundingClientRect().bottom + 6) + "px"; }
+        if (!loc || !places) return;
+        const top = loc.getBoundingClientRect().bottom + 6;
+        places.style.top = top + "px";
+        places.style.maxHeight = Math.max(120, window.innerHeight - top - 16) + "px";
     }
     positionPlacesPanel();
     new ResizeObserver(positionPlacesPanel).observe($("panel-location"));
+    window.addEventListener("resize", positionPlacesPanel);
 
     // Undo
     $("btn-undo").addEventListener("click", undoTeleport);
@@ -339,7 +346,7 @@ function toggleTheme() { lightTheme = !lightTheme; document.body.classList.toggl
 // ── Coord format ────────────────────────────────────────────
 function toggleCoordFormat() { coordFormat = coordFormat === "dd" ? "dms" : "dd"; localStorage.setItem("coord_fmt", coordFormat); $("btn-coord-fmt").textContent = coordFormat.toUpperCase(); if (marker) { const ll = marker.getLatLng(); updateCoordInputs(ll.lat, ll.lng); } }
 function toDMS(deg, isLon) { const dir = isLon ? (deg >= 0 ? "E" : "W") : (deg >= 0 ? "N" : "S"); deg = Math.abs(deg); const d = Math.floor(deg); const m = Math.floor((deg - d) * 60); const s = ((deg - d - m / 60) * 3600).toFixed(1); return d + "\u00B0" + m + "'" + s + '"' + dir; }
-function updateCoordInputs(lat, lng) { if (coordFormat === "dms") { $("lat-input").value = toDMS(lat, false); $("lon-input").value = toDMS(lng, true); } else { $("lat-input").value = lat.toFixed(6); $("lon-input").value = lng.toFixed(6); } if ($("coord-text")) $("coord-text").textContent = lat.toFixed(6) + ", " + lng.toFixed(6); }
+function updateCoordInputs(lat, lng) { if (coordFormat === "dms") { $("lat-input").value = toDMS(lat, false); $("lon-input").value = toDMS(lng, true); } else { $("lat-input").value = lat.toFixed(6); $("lon-input").value = lng.toFixed(6); } if ($("coord-text")) { $("coord-text").textContent = lat.toFixed(6) + ", " + lng.toFixed(6); $("coord-text").classList.add("coord-glow"); } }
 
 // ── Teleport ────────────────────────────────────────────────
 function toggleTeleport() { teleportMode = !teleportMode; $("btn-teleport").classList.toggle("active", teleportMode); toast(teleportMode ? "Teleport ON \u2014 click map to move instantly" : "Teleport OFF", teleportMode ? "success" : "error"); }
@@ -399,7 +406,7 @@ async function setLocation() {
 }
 
 async function clearLocation() {
-    try { const r = await fetch("/api/location/clear", { method: "POST" }); if (r.ok) { activeSpoofLocation = null; toast("Reset to real GPS"); if (marker) { map.removeLayer(marker); marker = null; } $("lat-input").value = ""; $("lon-input").value = ""; if ($("coord-text")) $("coord-text").textContent = "Click map to set location"; if (startupLocation) goToUserLocation(); _stealthDismissed = false; await checkStealth(); } else { const d = await r.json().catch(() => ({})); toast(d.error || "Failed to reset", "error"); } } catch (e) { toast("Connection error", "error"); }
+    try { const r = await fetch("/api/location/clear", { method: "POST" }); if (r.ok) { activeSpoofLocation = null; toast("Reset to real GPS"); if (marker) { map.removeLayer(marker); marker = null; } $("lat-input").value = ""; $("lon-input").value = ""; if ($("coord-text")) { $("coord-text").textContent = "Click the map to set a location"; $("coord-text").classList.remove("coord-glow"); } if (startupLocation) goToUserLocation(); _stealthDismissed = false; await checkStealth(); } else { const d = await r.json().catch(() => ({})); toast(d.error || "Failed to reset", "error"); } } catch (e) { toast("Connection error", "error"); }
 }
 
 // ── Undo ────────────────────────────────────────────────────
