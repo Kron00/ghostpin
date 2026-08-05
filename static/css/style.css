@@ -1333,7 +1333,26 @@ body.map-picking .leaflet-container { cursor: crosshair; }
     font-variant-numeric: tabular-nums;
     color: var(--text-secondary);
 }
-.route-label { font-size: var(--t-meta); color: var(--text-secondary); }
+/* Waypoint labels sit *on* their dot, so the tooltip's own chrome has to go —
+   left alone, Leaflet draws a white box with a pointer and you get a blob with
+   an unreadable number in it. */
+.leaflet-tooltip.route-label {
+    background: transparent !important;
+    border: none !important;
+    box-shadow: none !important;
+    padding: 0 !important;
+    margin: 0 !important;
+    color: var(--accent-ink) !important;
+    font-family: var(--font) !important;
+    font-size: 10px !important;
+    font-weight: 700 !important;
+    line-height: 1 !important;
+    text-shadow: none !important;
+    white-space: nowrap;
+    pointer-events: none;
+}
+.leaflet-tooltip.route-label::before,
+.leaflet-tooltip.route-label::after { display: none !important; }
 
 /* ── Joystick ────────────────────────────────────────────────── */
 

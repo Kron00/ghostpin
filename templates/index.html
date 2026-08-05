@@ -372,10 +372,14 @@
                 <div class="progress-track"><div id="progress-bar" class="progress-bar"></div></div>
                 <span id="route-pct">0%</span>
             </div>
-            <div class="btn-group">
-                <button id="btn-gpx-import" class="btn btn-ghost btn-xs">Import GPX</button>
-                <button id="btn-gpx-export" class="btn btn-ghost btn-xs">Export GPX</button>
-                <input type="file" id="gpx-file" accept=".gpx" class="hidden" />
+            <button id="btn-route-save-open" class="btn btn-ghost btn-xs" disabled>Save route</button>
+            <div id="route-save-form" class="inline-form hidden">
+                <div class="inline-form-title">Save route</div>
+                <input type="text" id="route-save-name" class="form-input" placeholder="Route name..." />
+                <div class="btn-group">
+                    <button id="btn-route-save-cancel" class="btn btn-ghost">Cancel</button>
+                    <button id="btn-route-save-confirm" class="btn btn-blue">Save</button>
+                </div>
             </div>
         </div>
         <!-- Joystick -->

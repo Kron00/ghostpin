@@ -211,9 +211,6 @@ document.addEventListener("DOMContentLoaded", async () => {
     });
     $("btn-theme").addEventListener("click", toggleTheme);
     $("btn-coord-fmt").addEventListener("click", toggleCoordFormat);
-    $("btn-gpx-import").addEventListener("click", () => $("gpx-file").click());
-    $("gpx-file").addEventListener("change", importGPX);
-    $("btn-gpx-export").addEventListener("click", exportGPX);
     $("btn-wander-start").addEventListener("click", startWander);
     $("btn-wander-stop").addEventListener("click", stopWander);
     $("btn-circular").addEventListener("click", generateCircularRoute);
@@ -316,7 +313,11 @@ document.addEventListener("DOMContentLoaded", async () => {
     $("follow-mode")?.addEventListener("change", e => { followMode = e.target.checked; });
 
     // Route save
-    $("btn-route-save")?.addEventListener("click", saveCurrentRoute);
+    $("btn-route-save")?.addEventListener("click", openRouteSaveForm);
+    $("btn-route-save-open").addEventListener("click", openRouteSaveForm);
+    $("btn-route-save-confirm").addEventListener("click", saveCurrentRoute);
+    $("btn-route-save-cancel").addEventListener("click", () => $("route-save-form").classList.add("hidden"));
+    $("route-save-name").addEventListener("keydown", e => { if (e.key === "Enter") saveCurrentRoute(); });
 
     // Coord HUD
     map.on("mousemove", e => { const h = $("coord-hud"); if (h) { h.classList.remove("hidden"); $("coord-hud-text").textContent = e.latlng.lat.toFixed(6) + ", " + e.latlng.lng.toFixed(6); } });
@@ -736,8 +737,43 @@ async function confirmSaveLocation() { const name = $("save-name").value.trim();
 
 // ── Route / Movement ────────────────────────────────────────
 function addRoutePoint(lat, lng, preserveCalculated = false) { if (!preserveCalculated) { calculatedRouteCoordinates = null; calculatedRouteProvider = null; } routePoints.push({ lat, lng }); const m = L.circleMarker([lat, lng], { radius: 6, color: "#6F999A", fillColor: "#6F999A", fillOpacity: 1, weight: 0 }).addTo(map); m.bindTooltip(String(routePoints.length), { permanent: true, direction: "center", className: "route-label" }); routeMarkers.push(m); if (routePoints.length >= 2) { if (routeLine) map.removeLayer(routeLine); routeLine = L.polyline(routePoints.map(p => [p.lat, p.lng]), { color: "#6F999A", weight: 2, dashArray: "8 6", opacity: 0.6 }).addTo(map); } updateRouteUI(); }
-function clearRoutePoints() { routePoints = []; calculatedRouteCoordinates = null; calculatedRouteProvider = null; routeMarkers.forEach(m => map.removeLayer(m)); routeMarkers = []; if (routeLine) { map.removeLayer(routeLine); routeLine = null; } if (routeDisplayLine) { map.removeLayer(routeDisplayLine); routeDisplayLine = null; } if (routeTraveledLine) { map.removeLayer(routeTraveledLine); routeTraveledLine = null; } const addressStatus = $("route-address-status"); if (addressStatus) { addressStatus.textContent = ""; addressStatus.className = "route-address-status"; } updateRouteUI(); $("route-progress").classList.add("hidden"); }
-function updateRouteUI() { $("btn-route-start").disabled = routePoints.length < 2; $("route-hint").textContent = routePoints.length > 0 ? routePoints.length + " point" + (routePoints.length > 1 ? "s" : "") + " \u2014 shift+click to add more" : "Shift+click map to add route points"; }
+// Drawing a calculated route replaces the geometry but must not throw away
+// the itinerary that produced it.
+function clearRouteGeometry() {
+    routePoints = []; calculatedRouteCoordinates = null; calculatedRouteProvider = null;
+    routeMarkers.forEach(m => map.removeLayer(m)); routeMarkers = [];
+    if (routeLine) { map.removeLayer(routeLine); routeLine = null; }
+    if (routeDisplayLine) { map.removeLayer(routeDisplayLine); routeDisplayLine = null; }
+    if (routeTraveledLine) { map.removeLayer(routeTraveledLine); routeTraveledLine = null; }
+    $("route-progress").classList.add("hidden");
+}
+
+// Clear means the whole plan: geometry, stops and everything drawn for them.
+function clearRoutePoints() {
+    clearRouteGeometry();
+    clearStopsOnMap();
+    routeStops = [{ text: "", place: null }, { text: "", place: null }];
+    setMapPick(null);
+    renderStops();
+    const addressStatus = $("route-address-status");
+    if (addressStatus) { addressStatus.textContent = ""; addressStatus.className = "route-address-status hidden"; }
+    updateRouteUI();
+}
+function updateRouteUI() {
+    // With no calculated geometry the stops themselves are the route, so the
+    // server can join them. Keeps Start live as soon as a plan exists.
+    const placed = routeStops.filter(stop => stop.place && stop.place.lat != null);
+    if (!calculatedRouteCoordinates && placed.length >= 2) {
+        routePoints = placed.map(stop => ({ lat: stop.place.lat, lng: stop.place.lon }));
+    }
+    const ready = routePoints.length >= 2;
+    $("btn-route-start").disabled = !ready;
+    const save = $("btn-route-save-open");
+    if (save) save.disabled = !ready;
+    $("route-hint").textContent = ready
+        ? routePoints.length + " point" + (routePoints.length > 1 ? "s" : "") + " ready"
+        : "Add at least two stops to build a route";
+}
 
 // ── Address autocomplete ─────────────────────────────────────
 // The top-bar search already resolves places; route fields deserve the same
@@ -837,6 +873,8 @@ function setStopFromPlace(index, place) {
     routeStops[index] = { text: label, place };
     setBuildMode("stops");
     renderStops();
+    // Show where it landed, and frame the whole plan once there is one.
+    renderStopsOnMap(routeStops.filter(s => s.place).length >= 2);
     toast("Stop " + stopLabel(index) + " set to " + label);
 }
 
@@ -896,6 +934,50 @@ function handleMapPick(lat, lng) {
     } else {
         setStopFromPlace(mapPickTarget, place);
         setMapPick(null);
+    }
+}
+
+// ── Stops on the map ─────────────────────────────────────────
+// Every stop now carries coordinates, so the plan can be drawn as soon as it
+// exists rather than only after Calculate. Dashed, because it is the intent
+// and not yet a real road route.
+
+let stopMarkers = [];
+let stopLine = null;
+
+function clearStopsOnMap() {
+    stopMarkers.forEach(m => map.removeLayer(m));
+    stopMarkers = [];
+    if (stopLine) { map.removeLayer(stopLine); stopLine = null; }
+}
+
+function renderStopsOnMap(fit = false) {
+    if (!map) return;
+    clearStopsOnMap();
+    const placed = routeStops
+        .map((stop, index) => ({ stop, index }))
+        .filter(entry => entry.stop.place && entry.stop.place.lat != null);
+
+    placed.forEach(({ stop, index }) => {
+        const marker = L.circleMarker([stop.place.lat, stop.place.lon], {
+            radius: 8, color: "#79C2B8", fillColor: "#79C2B8", fillOpacity: 1, weight: 0,
+        }).addTo(map);
+        marker.bindTooltip(stopLabel(index), {
+            permanent: true, direction: "center", className: "route-label",
+        });
+        marker.bindPopup(stop.text);
+        stopMarkers.push(marker);
+    });
+
+    if (placed.length >= 2) {
+        stopLine = L.polyline(placed.map(e => [e.stop.place.lat, e.stop.place.lon]), {
+            color: "#79C2B8", weight: 2, dashArray: "7 6", opacity: 0.65,
+        }).addTo(map);
+    }
+
+    if (fit && placed.length) {
+        const bounds = L.latLngBounds(placed.map(e => [e.stop.place.lat, e.stop.place.lon]));
+        map.fitBounds(bounds, { padding: [60, 60], maxZoom: 16 });
     }
 }
 
@@ -1055,12 +1137,14 @@ function renderStops() {
 
         list.appendChild(row);
     });
+
+    renderStopsOnMap();
+    updateRouteUI();
 }
 
 function addStop() {
     if (routeStops.length >= 10) return toast("A route can have at most 10 stops", "error");
-    // New stops go before the destination, which is what "add a stop" means.
-    routeStops.splice(routeStops.length - 1, 0, { text: "", place: null });
+    routeStops.push({ text: "", place: null });
     renderStops();
 }
 
@@ -1078,7 +1162,7 @@ function setBuildMode(mode) {
 }
 
 function drawCalculatedRoute(data, label) {
-    clearRoutePoints();
+    clearRouteGeometry();
     // A circle is 49 waypoints; numbering every one of them buries the map in
     // markers. Past a handful, the line alone communicates the shape.
     if (data.waypoints.length > 12) {
@@ -1201,41 +1285,6 @@ function stopMovementTracking() { if (movementPolling) { clearInterval(movementP
 async function pollPosition() { try { const r = await fetch("/api/location/current"); if (!r.ok) return; const loc = await r.json(); activeSpoofLocation = { lat: loc.lat, lon: loc.lon }; placeMarker(loc.lat, loc.lon); if (followMode) { map.stop(); map.panTo([loc.lat, loc.lon], { animate: true, duration: 0.3, noMoveStart: true }); } } catch (e) {} }
 
 // ── GPX ─────────────────────────────────────────────────────
-async function importGPX() { const file = $("gpx-file").files[0]; if (!file) return; const fd = new FormData(); fd.append("file", file); try { const r = await fetch("/api/gpx/import", { method: "POST", body: fd }); const d = await r.json(); if (!r.ok) return toast(d.error || "Import failed", "error"); clearRoutePoints(); d.waypoints.forEach(wp => addRoutePoint(wp.lat, wp.lng)); if (d.waypoints.length > 0) map.flyTo([d.waypoints[0].lat, d.waypoints[0].lng], 14); toast("Imported " + d.count + " waypoints"); } catch (e) { toast("Import failed", "error"); } $("gpx-file").value = ""; }
-async function exportGPX() {
-    try {
-        const response = await fetch("/api/gpx/export?name=Ghostpin%20Route");
-        if (!response.ok) {
-            const data = await response.json().catch(() => ({}));
-            return toast(data.error || "Export failed", "error");
-        }
-        const content = await response.text();
-
-        // The packaged macOS app uses a native Save dialog. WKWebView does not
-        // reliably honor window.open/attachment downloads.
-        if (window.pywebview?.api?.save_gpx) {
-            const result = await window.pywebview.api.save_gpx(content, "ghostpin-route.gpx");
-            if (result?.ok) return toast("GPX exported");
-            if (result?.cancelled) return;
-            return toast(result?.error || "Export failed", "error");
-        }
-
-        // Browser development fallback.
-        const blob = new Blob([content], { type: "application/gpx+xml" });
-        const url = URL.createObjectURL(blob);
-        const link = document.createElement("a");
-        link.href = url;
-        link.download = "ghostpin-route.gpx";
-        document.body.appendChild(link);
-        link.click();
-        link.remove();
-        URL.revokeObjectURL(url);
-        toast("GPX exported");
-    } catch (error) {
-        toast("Export failed", "error");
-    }
-}
-
 // ── Joystick ────────────────────────────────────────────────
 const _keyMap = { w: "n", a: "w", s: "s", d: "e", arrowup: "n", arrowdown: "s", arrowleft: "w", arrowright: "e" };
 let _activeKeys = new Set();
@@ -1363,4 +1412,35 @@ async function loadRouteHistory() {
     routes.forEach(rt => { const item = document.createElement("div"); item.className = "saved-item"; const n = document.createElement("span"); n.className = "saved-name"; n.textContent = rt.name; const co = document.createElement("span"); co.className = "saved-coords"; co.textContent = rt.distance_km != null ? formatRouteDistance(rt.distance_km) : "?"; const del = document.createElement("button"); del.className = "saved-del"; del.title = "Delete"; del.textContent = "\u00D7"; del.addEventListener("click", async e => { e.stopPropagation(); await fetch("/api/routes/" + encodeURIComponent(rt.id), { method: "DELETE" }); loadRouteHistory(); toast("Route deleted"); }); item.appendChild(n); item.appendChild(co); item.appendChild(del); item.addEventListener("click", e => { if (e.target.classList.contains("saved-del")) return; if (rt.waypoints) { clearRoutePoints(); rt.waypoints.forEach(wp => addRoutePoint(wp.lat, wp.lng)); if (rt.waypoints.length) map.flyTo([rt.waypoints[0].lat, rt.waypoints[0].lng], 14); toast('Loaded "' + rt.name + '"'); } }); c.appendChild(item); });
     } catch (e) {}
 }
-async function saveCurrentRoute() { if (routePoints.length < 2) return toast("No route to save", "error"); const name = prompt("Route name:"); if (!name?.trim()) return; try { const r = await fetch("/api/routes", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ name: name.trim(), waypoints: routePoints, speed: selectedSpeed, mode: $("route-mode").value, distance_km: routeDistanceKm }) }); if (r.ok) { loadRouteHistory(); toast('Route "' + name.trim() + '" saved'); $("btn-route-save").style.display = "none"; } } catch (e) { toast("Error", "error"); } }
+function suggestedRouteName() {
+    const named = routeStops.filter(stop => stop.text.trim()).map(stop => stop.text.trim());
+    if (named.length >= 2) return named[0] + " \u2192 " + named[named.length - 1];
+    return "Route";
+}
+
+function openRouteSaveForm() {
+    if (routePoints.length < 2) return toast("Build a route first", "error");
+    const form = $("route-save-form");
+    form.classList.remove("hidden");
+    const field = $("route-save-name");
+    field.value = suggestedRouteName();
+    field.focus();
+    field.select();
+}
+
+async function saveCurrentRoute() {
+    if (routePoints.length < 2) return toast("Build a route first", "error");
+    const name = $("route-save-name").value.trim();
+    if (!name) return toast("Give the route a name", "error");
+    try {
+        const r = await fetch("/api/routes", {
+            method: "POST", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ name, waypoints: routePoints, speed: selectedSpeed,
+                                   mode: $("route-mode").value, distance_km: routeDistanceKm })
+        });
+        if (!r.ok) return toast("Could not save the route", "error");
+        $("route-save-form").classList.add("hidden");
+        loadRouteHistory();
+        toast('Route "' + name + '" saved');
+    } catch (e) { toast("Could not save the route", "error"); }
+}
