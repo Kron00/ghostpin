@@ -187,22 +187,25 @@ document.addEventListener("DOMContentLoaded", async () => {
     });
     renderStops();
 
-    attachAutocomplete($("circle-center"), $("ac-circle-center"), place => { circlePlace = place; });
-    $("circle-center").addEventListener("input", () => { circlePlace = null; });
     $("close-loop").addEventListener("change", event => {
         closeLoop = event.target.checked;
         renderStopsOnMap();
         updateRouteUI();
     });
-    $("btn-map-pick").addEventListener("click", () => setMapPick(mapPickTarget === "append" ? null : "append"));
-    $("btn-circle-build").addEventListener("click", buildCircleRoute);
-    $("btn-circle-here").addEventListener("click", () => {
-        if (!marker) return toast("Click the map to place a marker first", "error");
-        const point = marker.getLatLng();
-        circlePlace = { lat: point.lat, lon: point.lng };
-        $("circle-center").value = point.lat.toFixed(6) + ", " + point.lng.toFixed(6);
-        toast("Centre set to the current marker");
+    $("btn-roam-center").addEventListener("click", () => setMapPick("roam"));
+    $("btn-roam-start").addEventListener("click", startRoaming);
+    $("btn-roam-stop").addEventListener("click", stopRoaming);
+    $("roam-radius").addEventListener("input", () => { renderRoamArea(); updateRoamUI(); });
+    $("roam-unit-toggle").addEventListener("click", () => {
+        // Convert the number so the distance on the ground does not jump.
+        const metres = roamRadiusMetres();
+        roamUnitMiles = !roamUnitMiles;
+        localStorage.setItem("roam_unit", roamUnitMiles ? "mi" : "km");
+        if (metres) $("roam-radius").value = (roamUnitMiles ? metres / METRES_PER_MILE : metres / 1000).toFixed(2);
+        renderRoamArea(); updateRoamUI();
     });
+    updateRoamUI();
+    $("btn-map-pick").addEventListener("click", () => setMapPick(mapPickTarget === "append" ? null : "append"));
     $("btn-layer").addEventListener("click", toggleTiles);
     $("btn-my-location").addEventListener("click", goToUserLocation);
     $("btn-zoom-in").addEventListener("click", () => map.zoomIn());
@@ -216,9 +219,6 @@ document.addEventListener("DOMContentLoaded", async () => {
     });
     $("btn-theme").addEventListener("click", toggleTheme);
     $("btn-coord-fmt").addEventListener("click", toggleCoordFormat);
-    $("btn-wander-start").addEventListener("click", startWander);
-    $("btn-wander-stop").addEventListener("click", stopWander);
-    $("btn-circular").addEventListener("click", generateCircularRoute);
 
     // Joystick
     document.querySelectorAll(".joy-btn[data-dir]").forEach(btn => {
@@ -919,7 +919,9 @@ function setMapPick(target) {
         toggle.textContent = target === "append" ? "Stop picking" : "Click the map to add stops";
     }
     renderStops();
-    if (armed) {
+    if (target === "roam") {
+        $("route-hint").textContent = "Click the map to set the centre of the area. Esc to cancel.";
+    } else if (armed) {
         $("route-hint").textContent = target === "append"
             ? "Click the map to add a stop. Esc to stop."
             : "Click the map to set stop " + stopLabel(target) + ". Esc to cancel.";
@@ -929,6 +931,7 @@ function setMapPick(target) {
 }
 
 function handleMapPick(lat, lng) {
+    if (mapPickTarget === "roam") { setRoamCentre(lat, lng); setMapPick(null); return; }
     const label = lat.toFixed(5) + ", " + lng.toFixed(5);
     const place = { name: label, display_name: label, lat, lon: lng };
     if (mapPickTarget === "append") {
@@ -996,6 +999,77 @@ function moveStop(from, to) {
     const [moved] = routeStops.splice(from, 1);
     routeStops.splice(to, 0, moved);
     renderStops();
+}
+
+
+// ── Roam ─────────────────────────────────────────────────────
+// Move about at random inside an area rather than along a route. The centre is
+// picked on the map; the radius is shown in whichever unit suits the distance.
+
+let roamCentre = null;
+let roamCircle = null;
+let roamUnitMiles = localStorage.getItem("roam_unit") !== "km";
+let roamActive = false;
+
+const METRES_PER_MILE = 1609.344;
+
+function roamRadiusMetres() {
+    const value = parseFloat($("roam-radius").value);
+    if (!(value > 0)) return null;
+    return roamUnitMiles ? value * METRES_PER_MILE : value * 1000;
+}
+
+function renderRoamArea() {
+    if (roamCircle) { map.removeLayer(roamCircle); roamCircle = null; }
+    const radius = roamRadiusMetres();
+    if (!roamCentre || !radius) return;
+    roamCircle = L.circle([roamCentre.lat, roamCentre.lon], {
+        radius,
+        color: "#79C2B8", weight: 2, dashArray: "7 6", opacity: 0.7,
+        fillColor: "#79C2B8", fillOpacity: 0.07,
+    }).addTo(map);
+}
+
+function setRoamCentre(lat, lon) {
+    roamCentre = { lat, lon };
+    const slot = $("btn-roam-center");
+    slot.textContent = lat.toFixed(5) + ", " + lon.toFixed(5);
+    slot.classList.remove("is-empty");
+    renderRoamArea();
+    updateRoamUI();
+}
+
+function updateRoamUI() {
+    const ready = !!roamCentre && !!roamRadiusMetres();
+    $("btn-roam-start").disabled = !ready || roamActive;
+    $("btn-roam-stop").disabled = !roamActive;
+    $("roam-unit-toggle").textContent = roamUnitMiles ? "mi" : "km";
+}
+
+async function startRoaming() {
+    const radius = roamRadiusMetres();
+    if (!roamCentre || !radius) return toast("Pick a centre and a radius first", "error");
+    const speed = readSpeedKmh() || selectedSpeed;
+    try {
+        const r = await fetch("/api/wander/start", {
+            method: "POST", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ lat: roamCentre.lat, lon: roamCentre.lon, radius, speed })
+        });
+        const d = await r.json();
+        if (!r.ok) return toast(d.error || "Could not start roaming", "error");
+        roamActive = true;
+        updateRoamUI();
+        startMovementTracking();
+        toast("Roaming within " + $("roam-radius").value + " " + (roamUnitMiles ? "mi" : "km"));
+    } catch (e) { toast("Could not start roaming", "error"); }
+}
+
+async function stopRoaming() {
+    try { await fetch("/api/wander/stop", { method: "POST" }); } catch (e) { /* already stopped */ }
+    roamActive = false;
+    updateRoamUI();
+    stopMovementTracking();
+    toast("Roaming stopped");
 }
 
 // ── Explicit placement menu ──────────────────────────────────
@@ -1191,42 +1265,6 @@ function drawCalculatedRoute(data, label) {
     $("route-hint").textContent = label;
 }
 
-async function buildCircleRoute() {
-    const status = $("route-address-status");
-    const button = $("btn-circle-build");
-    const radius = parseFloat($("circle-radius").value);
-    const centre = circleCentre();
-    if (!centre) return toast("Pick a centre point first", "error");
-    if (!(radius >= 5)) return toast("Enter a radius of at least 5 m", "error");
-
-    button.disabled = true;
-    status.classList.remove("hidden");
-    status.className = "route-address-status loading";
-    status.textContent = "Building circle…";
-    try {
-        const response = await fetch("/api/route/circle", {
-            method: "POST", headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ lat: centre.lat, lon: centre.lon, radius, clockwise: !$("circle-ccw").checked })
-        });
-        const data = await response.json();
-        if (!response.ok) { status.className = "route-address-status error"; status.textContent = data.error || "Could not build the circle"; return toast(status.textContent, "error"); }
-        drawCalculatedRoute(data, "Circle ready");
-        status.className = "route-address-status success";
-        status.textContent = data.route_name + " · " + data.distance_km + " km around";
-        toast("Circle route ready");
-    } catch (error) {
-        status.className = "route-address-status error";
-        status.textContent = "Could not build the circle";
-    } finally { button.disabled = false; }
-}
-
-let circlePlace = null;
-function circleCentre() {
-    if (circlePlace) return { lat: circlePlace.lat, lon: circlePlace.lon };
-    if (marker) { const p = marker.getLatLng(); return { lat: p.lat, lon: p.lng }; }
-    return null;
-}
-
 async function calculateAddressRoute() {
     const status = $("route-address-status");
     const stops = routeStops.map(stop => stop.text.trim()).filter(Boolean);
@@ -1337,10 +1375,6 @@ function joystickStop() {
 }
 
 // ── Wander ──────────────────────────────────────────────────
-async function startWander() { const lat = parseFloat($("lat-input").value), lon = parseFloat($("lon-input").value); if (isNaN(lat) || isNaN(lon)) return toast("Set a location first", "error"); const radius = parseInt($("wander-radius").value, 10) || 200; const speed = readSpeedKmh() || selectedSpeed; try { const r = await fetch("/api/wander/start", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ lat, lon, radius, speed }) }); const d = await r.json(); if (r.ok) { $("btn-wander-start").disabled = true; $("btn-wander-stop").disabled = false; toast("Wandering within " + radius + "m"); startMovementTracking(); } else toast(d.error || "Failed", "error"); } catch (e) { toast("Error", "error"); } }
-async function stopWander() { try { await fetch("/api/wander/stop", { method: "POST" }); $("btn-wander-start").disabled = false; $("btn-wander-stop").disabled = true; toast("Wander stopped"); stopMovementTracking(); } catch (e) { toast("Error", "error"); } }
-async function generateCircularRoute() { const lat = parseFloat($("lat-input").value), lon = parseFloat($("lon-input").value); if (isNaN(lat) || isNaN(lon)) return toast("Set a location first", "error"); const radius = parseInt($("wander-radius").value, 10) || 200; try { const r = await fetch("/api/route/circular", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ lat, lon, radius }) }); const d = await r.json(); if (r.ok) { clearRoutePoints(); d.waypoints.forEach(wp => addRoutePoint(wp.lat, wp.lng)); toast("Circular route: " + d.count + " points"); } else toast(d.error || "Failed", "error"); } catch (e) { toast("Error", "error"); } }
-
 // ── Cooldown ────────────────────────────────────────────────
 async function pollCooldown() {
     try { const r = await fetch("/api/cooldown"); const d = await r.json(); const badge = $("cooldown-badge"), timeEl = $("cooldown-time"), bar = $("cooldown-bar");

@@ -306,7 +306,7 @@
             <div class="panel-section-title"><span>Build a route</span></div>
             <div class="mode-tabs" role="tablist" aria-label="Route builder">
                 <button class="mode-tab active" data-build="stops" role="tab" aria-selected="true">Stops</button>
-                <button class="mode-tab" data-build="circle" role="tab" aria-selected="false">Circle</button>
+                <button class="mode-tab" data-build="roam" role="tab" aria-selected="false">Roam</button>
                 <button class="mode-tab" data-build="map" role="tab" aria-selected="false">Map</button>
             </div>
 
@@ -322,23 +322,22 @@
                 <button id="btn-route-calculate" class="btn btn-blue btn-xs">Calculate route</button>
             </div>
 
-            <!-- Circle: centre plus radius -->
-            <div class="build-pane" id="build-circle">
+            <!-- Roam: move about at random inside an area, rather than along a path -->
+            <div class="build-pane" id="build-roam">
                 <div class="stop-row">
                     <span class="stop-marker" aria-hidden="true">◎</span>
-                    <div class="stop-field">
-                        <input type="text" id="circle-center" class="route-address-input" placeholder="Centre address or place" autocomplete="off" />
-                        <div class="ac-results" id="ac-circle-center"></div>
-                    </div>
+                    <button id="btn-roam-center" class="stop-slot is-empty" type="button">Centre — click to pick it on the map</button>
                 </div>
-                <button id="btn-circle-here" class="btn-inline">Use the current marker as the centre</button>
                 <div class="field-row">
-                    <label for="circle-radius">Radius</label>
-                    <input type="number" id="circle-radius" class="wander-input" value="500" min="5" max="50000" step="10" />
-                    <span class="hint">m</span>
-                    <label class="check-label"><input type="checkbox" id="circle-ccw" /> Anticlockwise</label>
+                    <label for="roam-radius">Stay within</label>
+                    <input type="number" id="roam-radius" class="wander-input" value="1" min="0.05" max="30" step="0.1" />
+                    <button id="roam-unit-toggle" class="speed-unit-toggle" type="button" title="Switch between miles and kilometres">mi</button>
                 </div>
-                <button id="btn-circle-build" class="btn btn-blue btn-xs">Build circle</button>
+                <div class="btn-group">
+                    <button id="btn-roam-start" class="btn btn-blue btn-xs" disabled>Start roaming</button>
+                    <button id="btn-roam-stop" class="btn btn-red btn-xs" disabled>Stop</button>
+                </div>
+                <p class="hint">Wanders at random inside the area at the speed set above, changing direction as it goes. It does not follow a fixed path.</p>
             </div>
 
             <!-- Map: point at places instead of naming them -->
@@ -399,20 +398,6 @@
                 <div></div>
                 <button class="joy-btn" data-dir="s" title="South" aria-label="Move south">&#9660;</button>
                 <div></div>
-            </div>
-        </div>
-        <!-- Wander -->
-        <div class="panel-section">
-            <div class="panel-section-title">
-                <span>Wander</span>
-                <span class="hint">
-                    <input type="number" id="wander-radius" value="200" min="10" max="5000" step="10" class="wander-input" aria-label="Wander radius in metres" /> m
-                </span>
-            </div>
-            <div class="btn-group">
-                <button id="btn-wander-start" class="btn btn-blue btn-xs">Wander</button>
-                <button id="btn-wander-stop" class="btn btn-red btn-xs" disabled>Stop</button>
-                <button id="btn-circular" class="btn btn-ghost btn-xs">Circular</button>
             </div>
         </div>
         <!-- Route History -->

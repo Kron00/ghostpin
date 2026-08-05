@@ -984,39 +984,6 @@ def _google_multi_stop_route(stops):
     }
 
 
-def _circle_route(lat, lon, radius_m, points=48, clockwise=True):
-    """Build a closed ring around a point. Pure geometry — no device, no network,
-    so a circle can be laid out before the phone is even connected."""
-    earth_radius_m = 6371000.0
-    lat_rad = math.radians(lat)
-    coordinates = []
-    waypoints = []
-
-    for index in range(points + 1):
-        angle = 2 * math.pi * (index / points)
-        if not clockwise:
-            angle = -angle
-        # Start at due north so the path begins at the top of the circle.
-        d_lat = (radius_m * math.cos(angle)) / earth_radius_m
-        d_lon = (radius_m * math.sin(angle)) / (earth_radius_m * math.cos(lat_rad))
-        point_lat = lat + math.degrees(d_lat)
-        point_lon = lon + math.degrees(d_lon)
-        coordinates.append([point_lon, point_lat])
-        waypoints.append({"lat": point_lat, "lng": point_lon})
-
-    return {
-        "provider": "circle",
-        "route_name": f"{int(round(radius_m))} m circle",
-        "origin": {"name": "Circle start", "lat": waypoints[0]["lat"], "lon": waypoints[0]["lng"]},
-        "destination": {"name": "Circle start", "lat": waypoints[-1]["lat"], "lon": waypoints[-1]["lng"]},
-        "waypoints": waypoints,
-        "coordinates": coordinates,
-        "distance_km": round(2 * math.pi * radius_m / 1000, 2),
-        "duration_min": None,
-        "center": {"lat": lat, "lon": lon},
-        "radius_m": radius_m,
-    }
-
 
 @app.route("/api/route/calculate", methods=["POST"])
 def api_route_calculate():
@@ -1047,24 +1014,6 @@ def api_route_calculate():
         return jsonify({"error": "Google Maps route service is unavailable"}), 502
 
 
-@app.route("/api/route/circle", methods=["POST"])
-def api_route_circle():
-    data = request.json or {}
-    try:
-        lat = float(data["lat"])
-        lon = float(data["lon"])
-        radius = float(data.get("radius", 200))
-        points = int(data.get("points", 48))
-    except (KeyError, TypeError, ValueError):
-        return jsonify({"error": "A centre point and radius are required"}), 400
-
-    if not (-90 <= lat <= 90 and -180 <= lon <= 180):
-        return jsonify({"error": "Centre point is out of range"}), 400
-    if not (5 <= radius <= 50000):
-        return jsonify({"error": "Radius must be between 5 m and 50 km"}), 400
-    points = max(8, min(360, points))
-
-    return jsonify(_circle_route(lat, lon, radius, points, bool(data.get("clockwise", True))))
 
 
 @app.route("/api/route/start", methods=["POST"])
