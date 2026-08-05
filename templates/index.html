@@ -291,19 +291,16 @@
     <div class="hud-panel-body">
         <div class="panel-section">
             <div class="panel-section-title"><span>Speed</span></div>
-            <div class="speed-segment">
-                <button class="seg-btn" data-speed="5">Walk</button>
-                <button class="seg-btn active" data-speed="15">Bike</button>
-                <button class="seg-btn" data-speed="40">Drive</button>
-                <div class="seg-custom">
-                    <input type="number" id="speed-input" value="15" min="1" max="300" step="0.1" aria-label="Movement speed" />
-                    <button id="speed-unit-toggle" class="speed-unit-toggle" type="button" title="Switch speed units to miles per hour">km/h</button>
-                </div>
+            <div class="field-row">
+                <input type="number" id="speed-input" value="15" min="1" max="300" step="0.1" class="speed-field" aria-label="Movement speed" />
+                <button id="speed-unit-toggle" class="speed-unit-toggle" type="button" title="Switch between mph and km/h">km/h</button>
+                <button id="btn-adaptive" class="btn btn-ghost btn-xs" type="button" title="Follow posted speed limits, easing off at stop signs and signals">Adaptive</button>
             </div>
+            <p class="hint hidden" id="adaptive-note">Follows posted limits from OpenStreetMap and eases off at stop signs and signals. Where no limit is posted it uses the speed above.</p>
         </div>
         <!-- How the route gets built: by address, by circle, or by map clicks -->
         <div class="panel-section">
-            <div class="panel-section-title"><span>Build a route</span></div>
+            <div class="panel-section-title"><span>Build a route</span><button id="btn-build-help" class="icon-btn" type="button" title="What are these?" aria-label="What are these?">?</button></div>
             <div class="mode-tabs" role="tablist" aria-label="Route builder">
                 <button class="mode-tab active" data-build="stops" role="tab" aria-selected="true">Stops</button>
                 <button class="mode-tab" data-build="roam" role="tab" aria-selected="false">Roam</button>
@@ -314,7 +311,6 @@
             <div class="build-pane active" id="build-stops">
                 <div id="stop-list" class="stop-list"></div>
                 <label class="check-label"><input type="checkbox" id="close-loop" /> Return to the start, closing the loop</label>
-                <p class="hint">Drag a letter to reorder, or hold Alt and press ↑ / ↓.</p>
                 <div class="btn-group">
                     <button id="btn-add-stop" class="btn btn-ghost btn-xs">+ Add stop</button>
                     <button id="btn-swap-stops" class="btn btn-ghost btn-xs" title="Reverse the order of the stops">Reverse</button>
@@ -329,21 +325,20 @@
                     <button id="btn-roam-center" class="stop-slot is-empty" type="button">Centre — click to pick it on the map</button>
                 </div>
                 <div class="field-row">
-                    <label for="roam-radius">Stay within</label>
-                    <input type="number" id="roam-radius" class="wander-input" value="1" min="0.05" max="30" step="0.1" />
+                    <label for="roam-radius-slider">Stay within</label>
+                    <input type="number" id="roam-radius" class="wander-input" value="1" min="0.05" max="30" step="0.05" aria-label="Roam radius" />
                     <button id="roam-unit-toggle" class="speed-unit-toggle" type="button" title="Switch between miles and kilometres">mi</button>
                 </div>
+                <input type="range" id="roam-radius-slider" class="slider" value="1" min="0.05" max="30" step="0.05" aria-label="Roam radius slider" />
                 <div class="btn-group">
                     <button id="btn-roam-start" class="btn btn-blue btn-xs" disabled>Start roaming</button>
                     <button id="btn-roam-stop" class="btn btn-red btn-xs" disabled>Stop</button>
                 </div>
-                <p class="hint">Wanders at random inside the area at the speed set above, changing direction as it goes. It does not follow a fixed path.</p>
             </div>
 
             <!-- Map: point at places instead of naming them -->
             <div class="build-pane" id="build-map">
                 <button id="btn-map-pick" class="btn btn-blue btn-xs">Click the map to add stops</button>
-                <p class="hint">Each click adds the next stop, so you can lay out a whole route by pointing at it. Press <kbd>Esc</kbd> to stop. Stops picked this way work exactly like typed ones, so you can mix them.</p>
             </div>
 
             <div id="route-address-status" class="route-address-status hidden"></div>
@@ -514,6 +509,19 @@
                 <div class="tips-item"><span class="tips-x">&times;</span> Cell tower triangulation &mdash; carrier infrastructure</div>
                 <div class="tips-hint">Most consumer apps don't check these. Banking &amp; gaming apps may.</div>
             </div>
+        </div>
+    </div>
+</div>
+
+<!-- ═══ Route builder help ═══ -->
+<div id="build-help" class="hidden">
+    <div class="help-card">
+        <div class="help-header"><span>Ways to build a route</span>
+            <button id="btn-build-help-close" class="hud-panel-close" aria-label="Close">&times;</button></div>
+        <div class="help-body">
+            <div class="help-item"><strong>Stops</strong><span>An ordered itinerary: A to B, with as many stops between as you like. Fill each one from the search bar or by pointing at the map, drag the letters to reorder, and tick <em>Return to the start</em> to close the loop. <em>Calculate route</em> then follows real roads.</span></div>
+            <div class="help-item"><strong>Roam</strong><span>No path at all. Pick a centre and a radius, and the location wanders at random inside that area, changing direction as it goes. Good for looking like you are somewhere without going anywhere in particular.</span></div>
+            <div class="help-item"><strong>Map</strong><span>Lay out a route by pointing. Each click adds the next stop, so you can trace a whole journey without typing. Press <kbd>Esc</kbd> when you are done. These stops behave exactly like searched ones, so the two can be mixed.</span></div>
         </div>
     </div>
 </div>

@@ -1913,3 +1913,97 @@ kbd {
        screen. Park them bottom-right over the map instead. */
     #map-controls { right: 12px; bottom: 60px; }
 }
+
+/* ── Speed field, roam slider, and the builder help ──────────── */
+
+.speed-field {
+    width: 74px;
+    text-align: right;
+    padding: 6px 8px;
+    font-size: var(--t-sm);
+}
+.speed-field:disabled { opacity: 0.5; cursor: not-allowed; }
+
+#btn-adaptive.active {
+    background: var(--accent);
+    border-color: var(--accent);
+    color: var(--accent-ink);
+    font-weight: 600;
+}
+
+/* A radius is a magnitude, so a slider reads it faster than a number does.
+   The number stays for when an exact value matters. */
+.slider {
+    -webkit-appearance: none;
+    appearance: none;
+    width: 100%;
+    height: 3px;
+    border-radius: 100px;
+    background: var(--surface-sunken);
+    outline: none;
+    cursor: pointer;
+}
+.slider::-webkit-slider-thumb {
+    -webkit-appearance: none;
+    appearance: none;
+    width: 15px; height: 15px;
+    border-radius: 50%;
+    background: var(--accent);
+    border: 2px solid var(--surface-solid);
+    box-shadow: 0 1px 4px rgba(3, 16, 18, 0.5);
+    cursor: grab;
+}
+.slider::-webkit-slider-thumb:active { cursor: grabbing; }
+.slider:focus-visible { outline: 2px solid var(--border-focus); outline-offset: 3px; }
+
+#build-help {
+    position: fixed;
+    inset: 0;
+    z-index: 3000;
+    display: grid;
+    place-items: center;
+    padding: 24px;
+    background: rgba(4, 16, 18, 0.62);
+    backdrop-filter: blur(7px);
+    -webkit-backdrop-filter: blur(7px);
+}
+body.light #build-help { background: rgba(16, 48, 46, 0.34); }
+
+.help-card {
+    width: 100%;
+    max-width: 460px;
+    max-height: 84vh;
+    display: flex;
+    flex-direction: column;
+    background: var(--surface-solid);
+    border: 1px solid var(--border);
+    border-radius: var(--r-lg);
+    box-shadow: var(--shadow-pop);
+    overflow: hidden;
+}
+.help-header {
+    display: flex;
+    align-items: center;
+    gap: 9px;
+    padding: 13px 12px 13px 16px;
+    border-bottom: 1px solid var(--border);
+}
+.help-header > span {
+    flex: 1;
+    font-size: var(--t-label);
+    font-weight: 650;
+    letter-spacing: 0.13em;
+    text-transform: uppercase;
+    color: var(--text-secondary);
+}
+.help-body {
+    padding: 14px 16px 18px;
+    overflow-y: auto;
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+}
+.help-item { display: flex; flex-direction: column; gap: 4px; }
+.help-item strong { font-size: var(--t-base); color: var(--text); font-weight: 650; }
+.help-item span { font-size: var(--t-sm); color: var(--text-secondary); line-height: 1.55; }
+.help-item em { color: var(--text); font-style: normal; font-weight: 600; }

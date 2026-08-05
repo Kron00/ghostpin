@@ -26,7 +26,25 @@ let trailPoints = [];
 let calculatedRouteCoordinates = null;
 let calculatedRouteProvider = null;
 let activeSpoofLocation = null;
-let speedUnit = localStorage.getItem("speed_unit") === "mph" ? "mph" : "kmh";
+// Unit is remembered once chosen; before that it follows the country the IP
+// lookup reports, so someone in the US is not handed km/h to correct.
+let speedUnit = localStorage.getItem("speed_unit") === "mph" ? "mph"
+              : (localStorage.getItem("speed_unit") === "kmh" ? "kmh" : null);
+
+function applyDetectedSpeedUnit(unit) {
+    if (unit !== "mph" && unit !== "kmh") return;
+    if (roamUnitMiles === null) {
+        roamUnitMiles = unit === "mph";
+        if (typeof setRoamUnitBounds === "function") setRoamUnitBounds();
+        if (typeof updateRoamUI === "function") updateRoamUI();
+    }
+    if (speedUnit !== null) return;
+    speedUnit = unit;
+    const toggle = $("speed-unit-toggle");
+    if (toggle) toggle.textContent = unit === "mph" ? "mph" : "km/h";
+    setSpeedInputFromKmh(selectedSpeed);
+    updateStatusBar();
+}
 let speedUpdateTimer = null;
 
 const KMH_PER_MPH = 1.609344;
@@ -38,44 +56,39 @@ function routeFollowZoomForSpeed(speed) {
 }
 
 function displaySpeedFromKmh(speedKmh) {
-    const value = speedUnit === "mph" ? speedKmh / KMH_PER_MPH : speedKmh;
+    const value = speedUnitOrDefault() === "mph" ? speedKmh / KMH_PER_MPH : speedKmh;
     return Math.abs(value - Math.round(value)) < 0.05 ? String(Math.round(value)) : value.toFixed(1);
 }
+
+function speedUnitOrDefault() { return speedUnit || "kmh"; }
 
 function readSpeedKmh() {
     const value = parseFloat($("speed-input")?.value);
     if (!Number.isFinite(value) || value <= 0) return null;
-    return speedUnit === "mph" ? value * KMH_PER_MPH : value;
+    return speedUnitOrDefault() === "mph" ? value * KMH_PER_MPH : value;
 }
 
 function setSpeedInputFromKmh(speedKmh) {
     const input = $("speed-input");
     if (!input) return;
     input.value = displaySpeedFromKmh(speedKmh);
-    input.min = speedUnit === "mph" ? "0.6" : "1";
-    input.max = speedUnit === "mph" ? "186.4" : "300";
+    input.min = speedUnitOrDefault() === "mph" ? "0.6" : "1";
+    input.max = speedUnitOrDefault() === "mph" ? "186.4" : "300";
     input.step = "0.1";
-}
-
-function updateSpeedPresetState() {
-    document.querySelectorAll(".seg-btn").forEach(button => {
-        button.classList.toggle("active", Math.abs(parseFloat(button.dataset.speed) - selectedSpeed) < 0.05);
-    });
 }
 
 function setSelectedSpeed(speedKmh, updateInput = true) {
     selectedSpeed = Math.max(1, Math.min(300, speedKmh));
     if (updateInput) setSpeedInputFromKmh(selectedSpeed);
-    updateSpeedPresetState();
     updateStatusBar();
 }
 
 function formatSpeed(speedKmh) {
-    return displaySpeedFromKmh(speedKmh) + " " + (speedUnit === "mph" ? "mph" : "km/h");
+    return displaySpeedFromKmh(speedKmh) + " " + (speedUnitOrDefault() === "mph" ? "mph" : "km/h");
 }
 
 function formatRouteDistance(distanceKm) {
-    return speedUnit === "mph" ? (distanceKm * 0.621371).toFixed(1) + " mi" : distanceKm.toFixed(1) + " km";
+    return speedUnitOrDefault() === "mph" ? (distanceKm * 0.621371).toFixed(1) + " mi" : distanceKm.toFixed(1) + " km";
 }
 
 function queueLiveSpeedUpdate(speedKmh, immediate = false) {
@@ -104,8 +117,8 @@ function toggleSpeedUnit() {
     localStorage.setItem("speed_unit", speedUnit);
     setSelectedSpeed(speedKmh);
     const toggle = $("speed-unit-toggle");
-    toggle.textContent = speedUnit === "mph" ? "mph" : "km/h";
-    toggle.title = speedUnit === "mph" ? "Switch speed units to kilometers per hour" : "Switch speed units to miles per hour";
+    toggle.textContent = speedUnitOrDefault() === "mph" ? "mph" : "km/h";
+    toggle.title = speedUnitOrDefault() === "mph" ? "Switch speed units to kilometers per hour" : "Switch speed units to miles per hour";
     loadRouteHistory();
 }
 
@@ -151,6 +164,7 @@ document.addEventListener("DOMContentLoaded", async () => {
         if (savedHome?.lat != null && savedHome?.lon != null) {
             startupLocation = { ...savedHome, stale: true };
             startLat = savedHome.lat; startLon = savedHome.lon; startZoom = 13;
+            applyDetectedSpeedUnit(savedHome.speed_unit);
         }
     } catch (e) {}
     try {
@@ -160,6 +174,7 @@ document.addEventListener("DOMContentLoaded", async () => {
             startupLocation = d;
             startLat = d.lat; startLon = d.lon; startZoom = 13;
             localStorage.setItem("last_home", JSON.stringify(d));
+            applyDetectedSpeedUnit(d.speed_unit);
         }
     } catch (e) {}
 
@@ -192,18 +207,34 @@ document.addEventListener("DOMContentLoaded", async () => {
         renderStopsOnMap();
         updateRouteUI();
     });
+    $("btn-adaptive").addEventListener("click", () => {
+        adaptiveSpeed = !adaptiveSpeed;
+        localStorage.setItem("adaptive_speed", adaptiveSpeed ? "1" : "0");
+        updateAdaptiveUI();
+        toast(adaptiveSpeed ? "Adaptive speed on" : "Adaptive speed off");
+    });
+    updateAdaptiveUI();
+
+    $("roam-radius-slider").addEventListener("input", () => syncRoamRadius("slider"));
+    $("btn-build-help").addEventListener("click", () => $("build-help").classList.remove("hidden"));
+    $("btn-build-help-close").addEventListener("click", () => $("build-help").classList.add("hidden"));
+    $("build-help").addEventListener("click", event => {
+        if (event.target === $("build-help")) $("build-help").classList.add("hidden");
+    });
+
     $("btn-roam-center").addEventListener("click", () => setMapPick("roam"));
     $("btn-roam-start").addEventListener("click", startRoaming);
     $("btn-roam-stop").addEventListener("click", stopRoaming);
-    $("roam-radius").addEventListener("input", () => { renderRoamArea(); updateRoamUI(); });
+    $("roam-radius").addEventListener("input", () => syncRoamRadius("field"));
     $("roam-unit-toggle").addEventListener("click", () => {
         // Convert the number so the distance on the ground does not jump.
         const metres = roamRadiusMetres();
-        roamUnitMiles = !roamUnitMiles;
+        roamUnitMiles = roamUnitMiles === false;
         localStorage.setItem("roam_unit", roamUnitMiles ? "mi" : "km");
         if (metres) $("roam-radius").value = (roamUnitMiles ? metres / METRES_PER_MILE : metres / 1000).toFixed(2);
-        renderRoamArea(); updateRoamUI();
+        setRoamUnitBounds(); syncRoamRadius("field");
     });
+    setRoamUnitBounds();
     updateRoamUI();
     $("btn-map-pick").addEventListener("click", () => setMapPick(mapPickTarget === "append" ? null : "append"));
     $("btn-layer").addEventListener("click", toggleTiles);
@@ -231,12 +262,6 @@ document.addEventListener("DOMContentLoaded", async () => {
     document.addEventListener("keyup", onKeyUp);
 
     // Speed
-    document.querySelectorAll(".seg-btn").forEach(btn => {
-        btn.addEventListener("click", () => {
-            setSelectedSpeed(parseFloat(btn.dataset.speed));
-            queueLiveSpeedUpdate(selectedSpeed, true);
-        });
-    });
     $("speed-input").addEventListener("input", () => {
         const speedKmh = readSpeedKmh();
         if (speedKmh == null || speedKmh > 300) return;
@@ -245,8 +270,8 @@ document.addEventListener("DOMContentLoaded", async () => {
     });
     $("speed-input").addEventListener("change", () => setSpeedInputFromKmh(selectedSpeed));
     $("speed-unit-toggle").addEventListener("click", toggleSpeedUnit);
-    $("speed-unit-toggle").textContent = speedUnit === "mph" ? "mph" : "km/h";
-    $("speed-unit-toggle").title = speedUnit === "mph" ? "Switch speed units to kilometers per hour" : "Switch speed units to miles per hour";
+    $("speed-unit-toggle").textContent = speedUnitOrDefault() === "mph" ? "mph" : "km/h";
+    $("speed-unit-toggle").title = speedUnitOrDefault() === "mph" ? "Switch speed units to kilometers per hour" : "Switch speed units to miles per hour";
     setSelectedSpeed(selectedSpeed);
 
     // Close dropdowns on outside click
@@ -1002,13 +1027,50 @@ function moveStop(from, to) {
 }
 
 
+
+// ── Adaptive speed ───────────────────────────────────────────
+// Posted limits come from OpenStreetMap. Google keeps its own behind the paid
+// Roads API, so it is not an option here.
+
+let adaptiveSpeed = localStorage.getItem("adaptive_speed") === "1";
+
+function updateAdaptiveUI() {
+    const button = $("btn-adaptive");
+    if (!button) return;
+    button.classList.toggle("active", adaptiveSpeed);
+    $("adaptive-note").classList.toggle("hidden", !adaptiveSpeed);
+    $("speed-input").disabled = adaptiveSpeed;
+    $("speed-input").title = adaptiveSpeed
+        ? "Adaptive is on — the speed follows posted limits"
+        : "";
+}
+
+// ── Roam radius slider ───────────────────────────────────────
+
+function syncRoamRadius(from) {
+    const slider = $("roam-radius-slider"), field = $("roam-radius");
+    if (from === "slider") field.value = slider.value;
+    else slider.value = field.value;
+    renderRoamArea();
+    updateRoamUI();
+}
+
+function setRoamUnitBounds() {
+    // Miles and kilometres want different ranges to feel right on the slider.
+    const slider = $("roam-radius-slider"), field = $("roam-radius");
+    const max = roamUnitMiles !== false ? 30 : 50;
+    slider.max = max; field.max = max;
+}
+
 // ── Roam ─────────────────────────────────────────────────────
 // Move about at random inside an area rather than along a route. The centre is
 // picked on the map; the radius is shown in whichever unit suits the distance.
 
 let roamCentre = null;
 let roamCircle = null;
-let roamUnitMiles = localStorage.getItem("roam_unit") !== "km";
+// Follows the same detection as the speed unit until explicitly chosen.
+let roamUnitMiles = localStorage.getItem("roam_unit") === "mi" ? true
+                  : (localStorage.getItem("roam_unit") === "km" ? false : null);
 let roamActive = false;
 
 const METRES_PER_MILE = 1609.344;
@@ -1016,7 +1078,7 @@ const METRES_PER_MILE = 1609.344;
 function roamRadiusMetres() {
     const value = parseFloat($("roam-radius").value);
     if (!(value > 0)) return null;
-    return roamUnitMiles ? value * METRES_PER_MILE : value * 1000;
+    return roamUnitMiles !== false ? value * METRES_PER_MILE : value * 1000;
 }
 
 function renderRoamArea() {
@@ -1043,7 +1105,7 @@ function updateRoamUI() {
     const ready = !!roamCentre && !!roamRadiusMetres();
     $("btn-roam-start").disabled = !ready || roamActive;
     $("btn-roam-stop").disabled = !roamActive;
-    $("roam-unit-toggle").textContent = roamUnitMiles ? "mi" : "km";
+    $("roam-unit-toggle").textContent = roamUnitMiles !== false ? "mi" : "km";
 }
 
 async function startRoaming() {
@@ -1060,7 +1122,7 @@ async function startRoaming() {
         roamActive = true;
         updateRoamUI();
         startMovementTracking();
-        toast("Roaming within " + $("roam-radius").value + " " + (roamUnitMiles ? "mi" : "km"));
+        toast("Roaming within " + $("roam-radius").value + " " + (roamUnitMiles !== false ? "mi" : "km"));
     } catch (e) { toast("Could not start roaming", "error"); }
 }
 
@@ -1295,7 +1357,7 @@ async function calculateAddressRoute() {
 
 async function startRoute() {
     if (routePoints.length < 2) return; const speed = readSpeedKmh() || selectedSpeed; const mode = $("route-mode").value; const randomize = $("speed-randomize").checked;
-    try { const r = await fetch("/api/route/start", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ waypoints: routePoints, speed, mode, randomize_speed: randomize, coordinates: calculatedRouteCoordinates, provider: calculatedRouteProvider }) }); const d = await r.json(); if (!r.ok) return toast(d.error || "Route failed", "error");
+    try { const r = await fetch("/api/route/start", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ waypoints: routePoints, speed, mode, randomize_speed: randomize, coordinates: calculatedRouteCoordinates, provider: calculatedRouteProvider, adaptive: adaptiveSpeed }) }); const d = await r.json(); if (!r.ok) return toast(d.error || "Route failed", "error");
     routeDistanceKm = d.distance_km || 0;
     if (d.coordinates) {
         if (routeLine) { map.removeLayer(routeLine); routeLine = null; }

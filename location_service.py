@@ -73,6 +73,7 @@ class LocationService:
         self._route_distance = 0
         self._route_duration = 0
         self._route_speed = 0
+        self._route_speeds = None
         self._route_coordinates = None
         self._route_mode = "once"       # "once", "loop", "pingpong"
         self._speed_randomize = False
@@ -302,7 +303,7 @@ class LocationService:
         return {"status": "Speed updated", "speed_kmh": speed, "active": active}
 
     def start_route(self, waypoints, speed_kmh=5, mode="once", randomize_speed=False,
-                    coordinates=None, provider="osrm"):
+                    coordinates=None, provider="osrm", speeds=None):
         if self._route_active:
             raise ValueError("A route is already running. Stop it first.")
         if len(waypoints) < 2:
@@ -344,6 +345,9 @@ class LocationService:
             self._route_duration = route["duration"]
         self._route_coordinates = coordinates
         self._route_speed = speed_kmh
+        # One target speed per segment when the caller worked out a profile
+        # from posted limits; otherwise a single speed for the whole route.
+        self._route_speeds = list(speeds) if speeds else None
         self._route_mode = mode
         self._route_provider = provider
         self._speed_randomize = randomize_speed
@@ -416,7 +420,11 @@ class LocationService:
                 elapsed = max(0.0, now - last_update)
                 last_update = now
                 speed_factor = random.uniform(0.8, 1.2) if self._speed_randomize else 1.0
-                speed_ms = max(float(self._route_speed) / 3.6, 0.01)
+                profile = self._route_speeds
+                target_kmh = (profile[min(segment_index, len(profile) - 1)]
+                              if profile else self._route_speed)
+                self._route_speed = target_kmh
+                speed_ms = max(float(target_kmh) / 3.6, 0.01)
                 # DVT writes add latency, so advance by real wall time. Keep
                 # the movement as one cumulative path distance so a tick that
                 # crosses Google's many short geometry segments does not lose

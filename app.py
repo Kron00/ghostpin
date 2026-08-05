@@ -267,6 +267,10 @@ def api_default_location():
                     "city": city,
                     "region": region,
                     "country": country,
+                    # Countries that post speeds in mph.
+                    "speed_unit": "mph" if str(country).upper() in
+                                  {"US", "GB", "UK", "LR", "MM", "BS", "BZ", "KY", "VG"}
+                                  else "kmh",
                     "source": "network",
                     "accuracy": "approximate",
                 }
@@ -985,6 +989,148 @@ def _google_multi_stop_route(stops):
 
 
 
+# ── Adaptive speed ─────────────────────────────────────────────
+# Google's posted speed limits live behind the Roads API, which needs a paid
+# key and is restricted to Asset Tracking customers, so they are not available
+# to us. OpenStreetMap tags the same information as `maxspeed`, free and
+# keyless, along with stop signs and traffic signals — which is what makes it
+# possible to slow down for a junction rather than only for a slower road.
+
+_MPH_TO_KMH = 1.609344
+_ADAPTIVE_DEFAULT_KMH = 48.0        # ~30 mph where nothing is tagged
+_JUNCTION_SLOW_KMH = 12.0           # crawling up to a stop sign or signal
+_JUNCTION_RADIUS_M = 45.0
+_MATCH_RADIUS_M = 35.0
+
+
+def _parse_maxspeed(value):
+    """OSM maxspeed is free text: '50', '35 mph', 'RU:urban'. Numbers only."""
+    if not value:
+        return None
+    text = str(value).strip().lower()
+    match = re.match(r"^(\d+(?:\.\d+)?)\s*(mph|km/h|kmh)?$", text)
+    if not match:
+        return None
+    number = float(match.group(1))
+    if number <= 0:
+        return None
+    return number * _MPH_TO_KMH if match.group(2) == "mph" else number
+
+
+def _fetch_speed_profile(coordinates, fallback_kmh):
+    """A target speed for every segment of the route, or None if unavailable.
+
+    One Overpass query for the route's bounding box, then nearest-match each
+    coordinate. Returns None rather than raising: adaptive speed is a nicety
+    and must never stop a route from running.
+    """
+    if not coordinates or len(coordinates) < 2:
+        return None
+
+    lats = [point[1] for point in coordinates]
+    lons = [point[0] for point in coordinates]
+    south, north, west, east = min(lats), max(lats), min(lons), max(lons)
+    # A continent-sized bbox would return an unusable amount of data.
+    if (north - south) > 1.2 or (east - west) > 1.2:
+        return None
+
+    pad = 0.003
+    bbox = f"{south - pad},{west - pad},{north + pad},{east + pad}"
+    query = (
+        "[out:json][timeout:25];("
+        f'way[highway][maxspeed]({bbox});'
+        f'node[highway~"^(stop|give_way|traffic_signals)$"]({bbox});'
+        ");out geom;"
+    )
+
+    try:
+        response = http_requests.post(
+            "https://overpass-api.de/api/interpreter",
+            data={"data": query},
+            headers={"User-Agent": "Ghostpin/2.0 (https://github.com/Kron00/ghostpin)"},
+            timeout=25,
+        )
+        response.raise_for_status()
+        elements = response.json().get("elements", [])
+    except (http_requests.RequestException, ValueError):
+        return None
+
+    # Bucket everything into a coarse grid so matching stays linear.
+    cell = 0.004
+    ways = {}
+    junctions = set()
+
+    def key(lat, lon):
+        return (int(lat / cell), int(lon / cell))
+
+    for element in elements:
+        if element.get("type") == "way":
+            speed = _parse_maxspeed(element.get("tags", {}).get("maxspeed"))
+            if not speed:
+                continue
+            for point in element.get("geometry", []) or []:
+                ways.setdefault(key(point["lat"], point["lon"]), []).append(
+                    (point["lat"], point["lon"], speed)
+                )
+        elif element.get("type") == "node":
+            junctions.add(key(element["lat"], element["lon"]))
+            # Keep the exact position for distance checks.
+            ways.setdefault(("j",) + key(element["lat"], element["lon"]), []).append(
+                (element["lat"], element["lon"], 0.0)
+            )
+
+    if not ways:
+        return None
+
+    def neighbours(lat, lon, prefix=()):
+        base = key(lat, lon)
+        for dy in (-1, 0, 1):
+            for dx in (-1, 0, 1):
+                for entry in ways.get(prefix + (base[0] + dy, base[1] + dx), []):
+                    yield entry
+
+    def metres(lat1, lon1, lat2, lon2):
+        dlat = (lat2 - lat1) * 111320.0
+        dlon = (lon2 - lon1) * 111320.0 * math.cos(math.radians(lat1))
+        return math.hypot(dlat, dlon)
+
+    base_speed = fallback_kmh if fallback_kmh and fallback_kmh > 0 else _ADAPTIVE_DEFAULT_KMH
+    speeds = []
+    tagged = 0
+
+    for index in range(len(coordinates) - 1):
+        lon, lat = coordinates[index][0], coordinates[index][1]
+
+        best_speed, best_distance = None, _MATCH_RADIUS_M
+        for way_lat, way_lon, speed in neighbours(lat, lon):
+            distance = metres(lat, lon, way_lat, way_lon)
+            if distance < best_distance:
+                best_distance, best_speed = distance, speed
+        if best_speed:
+            tagged += 1
+        target = best_speed or base_speed
+
+        # Ease off approaching a stop sign, give way, or signal.
+        for node_lat, node_lon, _ in neighbours(lat, lon, ("j",)):
+            if metres(lat, lon, node_lat, node_lon) < _JUNCTION_RADIUS_M:
+                target = min(target, _JUNCTION_SLOW_KMH)
+                break
+
+        speeds.append(round(target, 2))
+
+    # If almost nothing was tagged this is guesswork dressed up as data.
+    if tagged < max(3, len(speeds) * 0.1):
+        return None
+
+    # Smooth so the phone does not teleport between speeds at every node.
+    smoothed = []
+    for index, value in enumerate(speeds):
+        window = speeds[max(0, index - 2):index + 3]
+        smoothed.append(round(min(value, sum(window) / len(window)) if value <= _JUNCTION_SLOW_KMH
+                              else round(sum(window) / len(window), 2), 2))
+    return smoothed
+
+
 @app.route("/api/route/calculate", methods=["POST"])
 def api_route_calculate():
     data = request.json or {}
@@ -1031,6 +1177,12 @@ def api_route_start():
         speed = float(speed)
     except (TypeError, ValueError):
         speed = 5
+    speeds = None
+    adaptive_used = False
+    if data.get("adaptive") and coordinates:
+        speeds = _fetch_speed_profile(coordinates, speed)
+        adaptive_used = speeds is not None
+
     try:
         result = loc_svc.start_route(
             waypoints,
@@ -1039,7 +1191,9 @@ def api_route_start():
             randomize_speed=randomize,
             coordinates=coordinates,
             provider=data.get("provider") or "osrm",
+            speeds=speeds,
         )
+        result["adaptive"] = adaptive_used
         return jsonify(result)
     except ValueError as e:
         return jsonify({"error": str(e)}), 400
