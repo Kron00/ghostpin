@@ -1108,27 +1108,69 @@ function updateRoamUI() {
     $("roam-unit-toggle").textContent = roamUnitMiles !== false ? "mi" : "km";
 }
 
-async function startRoaming() {
+async function startRoaming(silent = false) {
     const radius = roamRadiusMetres();
     if (!roamCentre || !radius) return toast("Pick a centre and a radius first", "error");
     const speed = readSpeedKmh() || selectedSpeed;
+    const button = $("btn-roam-start");
+    button.disabled = true;
+    if (!silent) toast("Finding roads to roam…");
+
     try {
-        const r = await fetch("/api/wander/start", {
+        // Enough road for roughly half an hour before a fresh path is needed.
+        const targetKm = Math.max(1, (speed * 0.5));
+        const r = await fetch("/api/roam/route", {
             method: "POST", headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ lat: roamCentre.lat, lon: roamCentre.lon, radius, speed })
+            body: JSON.stringify({ lat: roamCentre.lat, lon: roamCentre.lon, radius, target_km: targetKm })
         });
-        const d = await r.json();
-        if (!r.ok) return toast(d.error || "Could not start roaming", "error");
+        const data = await r.json();
+        if (!r.ok) { roamActive = false; updateRoamUI(); return toast(data.error || "Could not find roads there", "error"); }
+
+        const start = await fetch("/api/route/start", {
+            method: "POST", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+                waypoints: data.waypoints, speed, mode: "once",
+                randomize_speed: $("speed-randomize").checked,
+                coordinates: data.coordinates, provider: "roam",
+                adaptive: adaptiveSpeed
+            })
+        });
+        const started = await start.json();
+        if (!start.ok) { roamActive = false; updateRoamUI(); return toast(started.error || "Could not start roaming", "error"); }
+
         roamActive = true;
         updateRoamUI();
+        drawRoamPath(data.coordinates);
+        clearInterval(routePolling);
+        routePolling = setInterval(pollRoute, 1000);
         startMovementTracking();
-        toast("Roaming within " + $("roam-radius").value + " " + (roamUnitMiles !== false ? "mi" : "km"));
-    } catch (e) { toast("Could not start roaming", "error"); }
+        if (!silent) toast("Roaming " + data.distance_km + " km of roads");
+    } catch (e) {
+        roamActive = false;
+        updateRoamUI();
+        toast("Could not start roaming", "error");
+    }
+}
+
+let roamPathLine = null;
+function drawRoamPath(coordinates) {
+    if (roamPathLine) map.removeLayer(roamPathLine);
+    roamPathLine = L.polyline(coordinates.map(c => [c[1], c[0]]),
+        { color: "#79C2B8", weight: 3, opacity: 0.75 }).addTo(map);
+}
+
+// When one stretch of road runs out, quietly lay out another so roaming keeps
+// going without repeating the same loop.
+async function continueRoaming() {
+    if (!roamActive) return;
+    await startRoaming(true);
 }
 
 async function stopRoaming() {
-    try { await fetch("/api/wander/stop", { method: "POST" }); } catch (e) { /* already stopped */ }
     roamActive = false;
+    try { await fetch("/api/route/stop", { method: "POST" }); } catch (e) { /* already stopped */ }
+    try { await fetch("/api/wander/stop", { method: "POST" }); } catch (e) { /* legacy */ }
+    if (roamPathLine) { map.removeLayer(roamPathLine); roamPathLine = null; }
     updateRoamUI();
     stopMovementTracking();
     toast("Roaming stopped");
@@ -1376,7 +1418,8 @@ async function startRoute() {
     } catch (e) { toast("Route error", "error"); }
 }
 
-async function stopRoute() { try { await fetch("/api/route/stop", { method: "POST" }); endRoute(); toast("Route stopped"); } catch (e) { toast("Failed", "error"); } }
+async function stopRoute() {
+    roamActive = false; try { await fetch("/api/route/stop", { method: "POST" }); endRoute(); toast("Route stopped"); } catch (e) { toast("Failed", "error"); } }
 async function pauseRoute() { try { await fetch("/api/route/pause", { method: "POST" }); $("btn-route-pause").classList.add("hidden"); $("btn-route-resume").classList.remove("hidden"); toast("Route paused"); } catch (e) { toast("Failed", "error"); } }
 async function resumeRoute() { try { await fetch("/api/route/resume", { method: "POST" }); $("btn-route-resume").classList.add("hidden"); $("btn-route-pause").classList.remove("hidden"); toast("Route resumed"); } catch (e) { toast("Failed", "error"); } }
 
@@ -1384,7 +1427,12 @@ async function pollRoute() {
     try { const r = await fetch("/api/route/status"); if (!r.ok) { endRoute(); return; } const d = await r.json();
     $("progress-bar").style.width = d.progress_pct + "%"; $("route-pct").textContent = Math.round(d.progress_pct) + "%";
     if ($("status-route")) { $("status-route").classList.remove("hidden"); const rem = routeDistanceKm * (1 - d.progress_pct / 100); const eta = d.speed_kmh > 0 ? Math.round((rem / d.speed_kmh) * 60) : 0; $("status-route-text").textContent = formatRouteDistance(rem) + " | ETA " + eta + "m | " + Math.round(d.progress_pct) + "%"; }
-    if (!d.active) { endRoute(); toast("Route completed"); if ($("btn-route-save")) $("btn-route-save").style.display = ""; }
+    if (!d.active) {
+        endRoute();
+        if (roamActive) { continueRoaming(); return; }
+        toast("Route completed");
+        if ($("btn-route-save")) $("btn-route-save").style.display = "";
+    }
     } catch (e) {}
 }
 

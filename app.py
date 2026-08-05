@@ -1,6 +1,7 @@
 import json
 import html
 import math
+import random
 import re
 import threading
 import time
@@ -987,6 +988,126 @@ def _google_multi_stop_route(stops):
         "legs": len(legs),
     }
 
+
+
+# ── Roaming the road network ───────────────────────────────────
+# Wandering in straight lines across whatever happens to be there — buildings,
+# rivers — does not look like a person moving. Roaming instead takes a random
+# walk over the actual road graph inside the area, which the ordinary route
+# runner can then drive.
+
+_ROAM_HIGHWAYS = (
+    "residential|living_street|tertiary|tertiary_link|secondary|secondary_link|"
+    "primary|primary_link|unclassified|road|service"
+)
+
+
+def _roam_route(lat, lon, radius_m, target_km):
+    """A road-following random walk inside the radius. None if unavailable."""
+    radius_m = max(50.0, min(float(radius_m), 50000.0))
+    query = (
+        "[out:json][timeout:25];"
+        f'way[highway~"^({_ROAM_HIGHWAYS})$"](around:{radius_m:.0f},{lat:.6f},{lon:.6f});'
+        "out body geom;"
+    )
+    try:
+        response = http_requests.post(
+            "https://overpass-api.de/api/interpreter",
+            data={"data": query},
+            headers={"User-Agent": "Ghostpin/2.0 (https://github.com/Kron00/ghostpin)"},
+            timeout=25,
+        )
+        response.raise_for_status()
+        elements = response.json().get("elements", [])
+    except (http_requests.RequestException, ValueError):
+        return None
+
+    def metres(lat1, lon1, lat2, lon2):
+        dlat = (lat2 - lat1) * 111320.0
+        dlon = (lon2 - lon1) * 111320.0 * math.cos(math.radians(lat1))
+        return math.hypot(dlat, dlon)
+
+    # Undirected graph keyed by OSM node id; edges carry their own geometry so
+    # curves are preserved rather than cut into chords.
+    graph = {}
+    position = {}
+    for element in elements:
+        node_ids = element.get("nodes") or []
+        geometry = element.get("geometry") or []
+        if len(node_ids) != len(geometry) or len(node_ids) < 2:
+            continue
+        for index in range(len(node_ids) - 1):
+            a, b = node_ids[index], node_ids[index + 1]
+            pa, pb = geometry[index], geometry[index + 1]
+            if None in (pa.get("lat"), pb.get("lat")):
+                continue
+            # Discard anything reaching outside the area.
+            if (metres(lat, lon, pa["lat"], pa["lon"]) > radius_m
+                    or metres(lat, lon, pb["lat"], pb["lon"]) > radius_m):
+                continue
+            position[a] = (pa["lat"], pa["lon"])
+            position[b] = (pb["lat"], pb["lon"])
+            length = metres(pa["lat"], pa["lon"], pb["lat"], pb["lon"])
+            graph.setdefault(a, []).append((b, length))
+            graph.setdefault(b, []).append((a, length))
+
+    if len(graph) < 4:
+        return None
+
+    start = min(graph, key=lambda nid: metres(lat, lon, *position[nid]))
+
+    target_m = max(400.0, float(target_km) * 1000.0)
+    coordinates = [[position[start][1], position[start][0]]]
+    travelled = 0.0
+    current, previous = start, None
+    # Bounded so a dead-end pocket cannot spin forever.
+    for _ in range(20000):
+        if travelled >= target_m:
+            break
+        options = graph.get(current) or []
+        if not options:
+            break
+        # Prefer not to double straight back, but take it at a dead end.
+        forward = [opt for opt in options if opt[0] != previous] or options
+        nxt, length = random.choice(forward)
+        coordinates.append([position[nxt][1], position[nxt][0]])
+        travelled += length
+        previous, current = current, nxt
+
+    if len(coordinates) < 3 or travelled < 200:
+        return None
+
+    return {
+        "provider": "roam",
+        "coordinates": coordinates,
+        "waypoints": [
+            {"lat": coordinates[0][1], "lng": coordinates[0][0]},
+            {"lat": coordinates[-1][1], "lng": coordinates[-1][0]},
+        ],
+        "distance_km": round(travelled / 1000, 2),
+    }
+
+
+@app.route("/api/roam/route", methods=["POST"])
+def api_roam_route():
+    data = request.json or {}
+    try:
+        lat = float(data["lat"])
+        lon = float(data["lon"])
+        radius = float(data.get("radius", 1000))
+        target_km = float(data.get("target_km", 8))
+    except (KeyError, TypeError, ValueError):
+        return jsonify({"error": "A centre and radius are required"}), 400
+    if not (-90 <= lat <= 90 and -180 <= lon <= 180):
+        return jsonify({"error": "Centre is out of range"}), 400
+
+    if not _search_allowed():
+        return jsonify({"error": "Too many requests, slow down"}), 429
+
+    route = _roam_route(lat, lon, radius, max(1.0, min(target_km, 60.0)))
+    if not route:
+        return jsonify({"error": "No roads found in that area. Try a larger radius."}), 404
+    return jsonify(route)
 
 
 # ── Adaptive speed ─────────────────────────────────────────────

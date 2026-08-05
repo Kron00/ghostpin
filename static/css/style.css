@@ -1937,15 +1937,23 @@ kbd {
     -webkit-appearance: none;
     appearance: none;
     width: 100%;
+    /* The thumb is 15px and overhangs a 3px track, so the control needs real
+       height of its own — otherwise it sits on top of whatever follows it. */
+    height: 22px;
+    margin: 0;
+    background: transparent;
+    outline: none;
+    cursor: pointer;
+}
+.slider::-webkit-slider-runnable-track {
     height: 3px;
     border-radius: 100px;
     background: var(--surface-sunken);
-    outline: none;
-    cursor: pointer;
 }
 .slider::-webkit-slider-thumb {
     -webkit-appearance: none;
     appearance: none;
+    margin-top: -6px;   /* centre the thumb on the 3px track */
     width: 15px; height: 15px;
     border-radius: 50%;
     background: var(--accent);
