@@ -313,6 +313,7 @@
             <!-- Stops: any number of addresses, each with search -->
             <div class="build-pane active" id="build-stops">
                 <div id="stop-list" class="stop-list"></div>
+                <p class="hint">Drag a letter to reorder, or hold Alt and press ↑ / ↓.</p>
                 <div class="btn-group">
                     <button id="btn-add-stop" class="btn btn-ghost btn-xs">+ Add stop</button>
                     <button id="btn-swap-stops" class="btn btn-ghost btn-xs" title="Reverse the order of the stops">Reverse</button>
@@ -339,9 +340,10 @@
                 <button id="btn-circle-build" class="btn btn-blue btn-xs">Build circle</button>
             </div>
 
-            <!-- Map: the original shift+click flow -->
+            <!-- Map: point at places instead of naming them -->
             <div class="build-pane" id="build-map">
-                <p class="hint">Shift-click the map to drop route points in order. Click <strong>Clear</strong> to start over.</p>
+                <button id="btn-map-pick" class="btn btn-blue btn-xs">Click the map to add stops</button>
+                <p class="hint">Each click adds the next stop, so you can lay out a whole route by pointing at it. Press <kbd>Esc</kbd> to stop. Stops picked this way work exactly like typed ones, so you can mix them.</p>
             </div>
 
             <div id="route-address-status" class="route-address-status hidden"></div>

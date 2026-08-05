@@ -335,10 +335,73 @@ body {
 }
 .icon-btn:hover { background: var(--surface-hover); color: var(--text); border-color: var(--border-strong); }
 
-/* Assign this place to a stop. The letter matches the route builder. */
-.stop-assign { font-variant-numeric: tabular-nums; }
-.stop-assign:hover { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); }
-.stop-assign.is-set { border-color: var(--accent-line); color: var(--accent); }
+/* Add-to-route is a split control: the left half does the obvious thing in
+   one click, the caret opens explicit placement. Two controls whatever the
+   stop count, instead of one button per stop. */
+.split-btn { display: flex; }
+.split-btn > .icon-btn:first-child {
+    border-top-right-radius: 0;
+    border-bottom-right-radius: 0;
+    width: auto;
+    padding: 0 7px;
+    gap: 4px;
+    color: var(--accent);
+}
+.split-btn > .icon-btn:last-child {
+    border-top-left-radius: 0;
+    border-bottom-left-radius: 0;
+    border-left: none;
+    width: 16px;
+    font-size: 9px;
+}
+.split-btn > .icon-btn:hover { background: var(--accent-bg); border-color: var(--accent-line); color: var(--accent); }
+
+/* Explicit placement menu, anchored to the caret. */
+.assign-menu {
+    position: fixed;
+    z-index: 2100;
+    min-width: 212px;
+    max-width: 280px;
+    padding: 4px;
+    background: var(--surface-solid);
+    border: 1px solid var(--border);
+    border-radius: var(--r-md);
+    box-shadow: var(--shadow-pop);
+}
+.assign-menu-title {
+    padding: 6px 8px 4px;
+    font-size: var(--t-label);
+    font-weight: 650;
+    letter-spacing: 0.11em;
+    text-transform: uppercase;
+    color: var(--text-tertiary);
+}
+.assign-menu-item {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    width: 100%;
+    padding: 7px 8px;
+    background: none;
+    border: none;
+    border-radius: var(--r-xs);
+    color: var(--text);
+    font-family: var(--font);
+    font-size: var(--t-sm);
+    text-align: left;
+    cursor: pointer;
+}
+.assign-menu-item:hover { background: var(--surface-hover); }
+.assign-menu-item .stop-marker { width: 16px; color: var(--accent); }
+.assign-menu-item span:last-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.assign-menu-item .is-empty { color: var(--text-tertiary); font-style: italic; }
+.assign-menu-sep { height: 1px; margin: 4px 2px; background: var(--border); }
+
+/* Reordering: the letter doubles as a drag handle. */
+.stop-marker[draggable="true"] { cursor: grab; }
+.stop-marker[draggable="true"]:active { cursor: grabbing; }
+.stop-row.dragging { opacity: 0.45; }
+.stop-row.drop-target { box-shadow: 0 -2px 0 var(--accent); }
 
 .search-google-link { color: var(--accent); }
 .search-google-link:hover { background: var(--accent-bg); border-color: var(--accent-line); color: var(--accent); }
@@ -1138,6 +1201,49 @@ body {
 
 .stop-field { position: relative; flex: 1; min-width: 0; }
 .stop-field .route-address-input { width: 100%; }
+
+/* A stop displays what was chosen; it is not a text field. Everything is
+   typed once, in the search bar. */
+.stop-slot {
+    flex: 1;
+    min-width: 0;
+    text-align: left;
+    padding: 7px 9px;
+    background: var(--surface-sunken);
+    border: 1px solid var(--border);
+    border-radius: var(--r-sm);
+    color: var(--text);
+    font-family: var(--font);
+    font-size: var(--t-sm);
+    cursor: pointer;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    transition: all var(--dur) var(--ease);
+}
+.stop-slot:hover { border-color: var(--border-strong); background: var(--surface-hover); }
+.stop-slot.is-empty { color: var(--text-tertiary); border-style: dashed; }
+
+.stop-pick {
+    flex-shrink: 0;
+    width: 22px; height: 22px;
+    display: grid; place-items: center;
+    background: none;
+    border: none;
+    border-radius: var(--r-xs);
+    color: var(--text-tertiary);
+    font-size: 13px;
+    line-height: 1;
+    cursor: pointer;
+    transition: all var(--dur) var(--ease);
+}
+.stop-pick:hover { background: var(--accent-bg); color: var(--accent); }
+.stop-pick.active { background: var(--accent); color: var(--accent-ink); }
+
+/* While a click is being awaited, the map is the control — say so with the
+   cursor and keep the picking affordance visible over everything. */
+body.map-picking #map { cursor: crosshair; }
+body.map-picking .leaflet-container { cursor: crosshair; }
 
 .stop-remove {
     flex-shrink: 0;

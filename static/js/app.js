@@ -189,6 +189,7 @@ document.addEventListener("DOMContentLoaded", async () => {
 
     attachAutocomplete($("circle-center"), $("ac-circle-center"), place => { circlePlace = place; });
     $("circle-center").addEventListener("input", () => { circlePlace = null; });
+    $("btn-map-pick").addEventListener("click", () => setMapPick(mapPickTarget === "append" ? null : "append"));
     $("btn-circle-build").addEventListener("click", buildCircleRoute);
     $("btn-circle-here").addEventListener("click", () => {
         if (!marker) return toast("Click the map to place a marker first", "error");
@@ -270,18 +271,9 @@ document.addEventListener("DOMContentLoaded", async () => {
     restorePanelStates();
 
     // Position Places panel
-    // Places sits under Location in the left column. Both are fixed-position,
-    // so nothing stops the second one running off the bottom of the screen —
-    // give it whatever room is left and let its body scroll inside that.
-    function positionPlacesPanel() {
-        const loc = $("panel-location"), places = $("panel-places");
-        if (!loc || !places) return;
-        const top = loc.getBoundingClientRect().bottom + 6;
-        places.style.top = top + "px";
-        places.style.maxHeight = Math.max(120, window.innerHeight - top - 16) + "px";
-    }
     positionPlacesPanel();
     new ResizeObserver(positionPlacesPanel).observe($("panel-location"));
+    new ResizeObserver(positionPlacesPanel).observe($("panel-places"));
     window.addEventListener("resize", positionPlacesPanel);
 
     // Undo
@@ -351,7 +343,41 @@ function esc(s) { const d = document.createElement("div"); d.textContent = s; re
 function escAttr(s) { return esc(s).replace(/"/g, "&quot;").replace(/'/g, "&#39;"); }
 
 // ── Panels ──────────────────────────────────────────────────
-function togglePanel(panelId) { const p = $(panelId); if (!p) return; p.classList.toggle("collapsed"); localStorage.setItem("panel_" + panelId, p.classList.contains("collapsed") ? "collapsed" : "open"); }
+function togglePanel(panelId) { const p = $(panelId); if (!p) return; p.classList.toggle("collapsed"); localStorage.setItem("panel_" + panelId, p.classList.contains("collapsed") ? "collapsed" : "open"); positionPlacesPanel(); }
+
+// The left column is two stacked fixed panels, so their heights have to be
+// shared out by hand. Collapsing Places hands its space to Location rather
+// than leaving a gap: the point of collapsing one is to see more of the other.
+function positionPlacesPanel() {
+    const loc = $("panel-location"), places = $("panel-places");
+    if (!loc || !places) return;
+    if (window.matchMedia("(max-width: 940px)").matches) {
+        // Panels are in normal flow at this width; leave the layout alone.
+        loc.style.maxHeight = ""; places.style.top = ""; places.style.maxHeight = "";
+        return;
+    }
+
+    const margin = 16, gap = 6;
+    const top = loc.getBoundingClientRect().top;
+    const available = window.innerHeight - top - margin;
+    const collapsed = places.classList.contains("collapsed");
+
+    // Measure what Places actually needs before deciding Location's cap.
+    places.style.maxHeight = "none";
+    const placesHeight = places.offsetHeight;
+
+    if (collapsed) {
+        loc.style.maxHeight = Math.max(220, available - placesHeight - gap) + "px";
+    } else {
+        loc.style.maxHeight = "";   // back to the CSS cap so both get a share
+    }
+
+    const placesTop = loc.getBoundingClientRect().bottom + gap;
+    places.style.top = placesTop + "px";
+    if (!collapsed) {
+        places.style.maxHeight = Math.max(120, window.innerHeight - placesTop - margin) + "px";
+    }
+}
 function restorePanelStates() { ["panel-location","panel-places","panel-movement"].forEach(id => { if (localStorage.getItem("panel_" + id) === "collapsed") $(id)?.classList.add("collapsed"); }); }
 
 // ── Onboarding ──────────────────────────────────────────────
@@ -378,7 +404,13 @@ function toggleTeleport() { teleportMode = !teleportMode; $("btn-teleport").clas
 function toggleShortcuts() { $("shortcuts-overlay").classList.toggle("hidden"); }
 
 // ── Map ─────────────────────────────────────────────────────
-function onMapClick(e) { if (e.originalEvent.shiftKey || routePoints.length > 0) { addRoutePoint(e.latlng.lat, e.latlng.lng); } else if (teleportMode) { placeMarker(e.latlng.lat, e.latlng.lng); teleportTo(e.latlng.lat, e.latlng.lng); } else { placeMarker(e.latlng.lat, e.latlng.lng); } }
+function onMapClick(e) {
+    // Picking wins over everything else: the click was asked for.
+    if (mapPickTarget !== null) { handleMapPick(e.latlng.lat, e.latlng.lng); return; }
+    if (e.originalEvent.shiftKey || routePoints.length > 0) { addRoutePoint(e.latlng.lat, e.latlng.lng); }
+    else if (teleportMode) { placeMarker(e.latlng.lat, e.latlng.lng); teleportTo(e.latlng.lat, e.latlng.lng); }
+    else { placeMarker(e.latlng.lat, e.latlng.lng); }
+}
 
 function showUserLocation(location) {
     const icon = L.divIcon({
@@ -519,23 +551,38 @@ async function doSearch(q) {
             const actions = document.createElement("div");
             actions.className = "search-actions";
 
-            // One button per stop, lettered to match the route builder, so a
-            // search result can go straight into a route without retyping it.
-            routeStops.forEach((stop, stopIndex) => {
-                const assign = document.createElement("button");
-                assign.type = "button";
-                assign.className = "icon-btn stop-assign" + (stop.text ? " is-set" : "");
-                assign.textContent = stopLabel(stopIndex);
-                assign.title = "Set as stop " + stopLabel(stopIndex)
-                    + (stop.text ? " (replaces “" + stop.text + "”)" : "");
-                assign.setAttribute("aria-label", assign.title);
-                assign.addEventListener("click", event => {
-                    event.stopPropagation();
-                    setStopFromPlace(stopIndex, res);
-                    c.classList.remove("visible");
-                });
-                actions.appendChild(assign);
+            // Split control: one click adds the place where it would naturally
+            // go; the caret is there for the rare "no, make it the destination".
+            const target = smartAddTarget();
+            const split = document.createElement("div");
+            split.className = "split-btn";
+
+            const add = document.createElement("button");
+            add.type = "button";
+            add.className = "icon-btn";
+            add.textContent = target ? "+ " + stopLabel(target.index) : "+";
+            add.title = target ? "Add as stop " + stopLabel(target.index) : "Route is full";
+            add.setAttribute("aria-label", add.title);
+            add.disabled = !target;
+            add.addEventListener("click", event => {
+                event.stopPropagation();
+                addPlaceToRoute(res);
+                c.classList.remove("visible");
             });
+
+            const caret = document.createElement("button");
+            caret.type = "button";
+            caret.className = "icon-btn";
+            caret.textContent = "▾";
+            caret.title = "Choose which stop to set";
+            caret.setAttribute("aria-label", caret.title);
+            caret.addEventListener("click", event => {
+                event.stopPropagation();
+                openAssignMenu(caret, res);
+            });
+
+            split.append(add, caret);
+            actions.appendChild(split);
 
             const googleLink = document.createElement("button");
             googleLink.className = "icon-btn search-google-link";
@@ -793,6 +840,138 @@ function setStopFromPlace(index, place) {
     toast("Stop " + stopLabel(index) + " set to " + label);
 }
 
+// Routes get built in order, so the one-click action fills the first empty
+// stop and only adds a new one when they are all taken. Picking an exact slot
+// is the rare case and lives behind the caret.
+function smartAddTarget() {
+    const empty = routeStops.findIndex(stop => !stop.text.trim());
+    if (empty !== -1) return { index: empty, isNew: false };
+    if (routeStops.length >= 10) return null;
+    return { index: routeStops.length, isNew: true };
+}
+
+function addPlaceToRoute(place) {
+    const target = smartAddTarget();
+    if (!target) return toast("A route can have at most 10 stops", "error");
+    if (target.isNew) routeStops.push({ text: "", place: null });
+    setStopFromPlace(target.index, place);
+}
+
+// ── Picking stops off the map ────────────────────────────────
+// A stop can come from search, from typing, or from pointing at the map.
+// While picking is armed the map click means "put it here" and nothing else,
+// so it can't be confused with placing the marker or teleporting.
+
+let mapPickTarget = null;   // null | "append" | stop index
+
+function setMapPick(target) {
+    mapPickTarget = target;
+    const armed = target !== null;
+    document.body.classList.toggle("map-picking", armed);
+    const toggle = $("btn-map-pick");
+    if (toggle) {
+        toggle.classList.toggle("active", target === "append");
+        toggle.textContent = target === "append" ? "Stop picking" : "Click the map to add stops";
+    }
+    renderStops();
+    if (armed) {
+        $("route-hint").textContent = target === "append"
+            ? "Click the map to add a stop. Esc to stop."
+            : "Click the map to set stop " + stopLabel(target) + ". Esc to cancel.";
+    } else {
+        updateRouteUI();
+    }
+}
+
+function handleMapPick(lat, lng) {
+    const label = lat.toFixed(5) + ", " + lng.toFixed(5);
+    const place = { name: label, display_name: label, lat, lon: lng };
+    if (mapPickTarget === "append") {
+        const target = smartAddTarget();
+        if (!target) { setMapPick(null); return toast("A route can have at most 10 stops", "error"); }
+        if (target.isNew) routeStops.push({ text: "", place: null });
+        setStopFromPlace(target.index, place);
+        // Stay armed so a whole itinerary can be clicked out in one go.
+        setMapPick("append");
+    } else {
+        setStopFromPlace(mapPickTarget, place);
+        setMapPick(null);
+    }
+}
+
+function moveStop(from, to) {
+    if (to < 0 || to >= routeStops.length || from === to) return;
+    const [moved] = routeStops.splice(from, 1);
+    routeStops.splice(to, 0, moved);
+    renderStops();
+}
+
+// ── Explicit placement menu ──────────────────────────────────
+
+let assignMenuEl = null;
+
+function closeAssignMenu() {
+    if (assignMenuEl) { assignMenuEl.remove(); assignMenuEl = null; }
+}
+
+function openAssignMenu(anchor, place) {
+    closeAssignMenu();
+    const menu = document.createElement("div");
+    menu.className = "assign-menu";
+
+    const title = document.createElement("div");
+    title.className = "assign-menu-title";
+    title.textContent = "Add to route";
+    menu.appendChild(title);
+
+    const target = smartAddTarget();
+    if (target) {
+        const add = document.createElement("button");
+        add.type = "button";
+        add.className = "assign-menu-item";
+        const marker = document.createElement("span");
+        marker.className = "stop-marker";
+        marker.textContent = stopLabel(target.index);
+        const text = document.createElement("span");
+        text.textContent = target.isNew ? "Add as a new stop" : "Fill the empty stop";
+        add.append(marker, text);
+        add.addEventListener("click", () => { closeAssignMenu(); addPlaceToRoute(place); });
+        menu.appendChild(add);
+        menu.appendChild(Object.assign(document.createElement("div"), { className: "assign-menu-sep" }));
+    }
+
+    routeStops.forEach((stop, index) => {
+        const item = document.createElement("button");
+        item.type = "button";
+        item.className = "assign-menu-item";
+        const marker = document.createElement("span");
+        marker.className = "stop-marker";
+        marker.textContent = stopLabel(index);
+        const text = document.createElement("span");
+        if (stop.text.trim()) { text.textContent = "Replace " + stop.text; }
+        else { text.textContent = "Empty"; text.className = "is-empty"; }
+        item.append(marker, text);
+        item.addEventListener("click", () => { closeAssignMenu(); setStopFromPlace(index, place); });
+        menu.appendChild(item);
+    });
+
+    document.body.appendChild(menu);
+    const box = anchor.getBoundingClientRect();
+    const width = menu.offsetWidth, height = menu.offsetHeight;
+    menu.style.left = Math.max(8, Math.min(box.right - width, window.innerWidth - width - 8)) + "px";
+    menu.style.top = (box.bottom + height + 8 > window.innerHeight ? box.top - height - 4 : box.bottom + 4) + "px";
+    assignMenuEl = menu;
+}
+
+document.addEventListener("click", event => {
+    if (assignMenuEl && !assignMenuEl.contains(event.target)) closeAssignMenu();
+});
+document.addEventListener("keydown", event => {
+    if (event.key !== "Escape") return;
+    closeAssignMenu();
+    if (mapPickTarget !== null) setMapPick(null);
+});
+
 function renderStops() {
     const list = $("stop-list");
     if (!list) return;
@@ -802,37 +981,73 @@ function renderStops() {
         const row = document.createElement("div");
         row.className = "stop-row" + (index === 0 ? " is-start" : (index === routeStops.length - 1 ? " is-end" : ""));
 
+        // The letter doubles as a drag handle: reordering here is what makes
+        // precise up-front placement unnecessary.
         const marker = document.createElement("span");
         marker.className = "stop-marker";
-        marker.setAttribute("aria-hidden", "true");
         marker.textContent = stopLabel(index);
+        marker.draggable = true;
+        marker.title = "Drag to reorder";
+        marker.addEventListener("dragstart", event => {
+            event.dataTransfer.setData("text/plain", String(index));
+            event.dataTransfer.effectAllowed = "move";
+            row.classList.add("dragging");
+        });
+        marker.addEventListener("dragend", () => {
+            row.classList.remove("dragging");
+            document.querySelectorAll(".stop-row").forEach(r => r.classList.remove("drop-target"));
+        });
+        row.addEventListener("dragover", event => { event.preventDefault(); row.classList.add("drop-target"); });
+        row.addEventListener("dragleave", () => row.classList.remove("drop-target"));
+        row.addEventListener("drop", event => {
+            event.preventDefault();
+            row.classList.remove("drop-target");
+            const from = parseInt(event.dataTransfer.getData("text/plain"), 10);
+            if (!Number.isNaN(from)) moveStop(from, index);
+        });
         row.appendChild(marker);
 
-        const field = document.createElement("div");
-        field.className = "stop-field";
-        const input = document.createElement("input");
-        input.type = "text";
-        input.className = "route-address-input";
-        input.autocomplete = "off";
-        input.value = stop.text;
-        input.placeholder = stopPlaceholder(index);
-        input.setAttribute("aria-label", input.placeholder);
-        input.addEventListener("input", () => { routeStops[index].text = input.value; routeStops[index].place = null; });
-        field.appendChild(input);
-
-        const results = document.createElement("div");
-        results.className = "ac-results";
-        field.appendChild(results);
-        row.appendChild(field);
-
-        attachAutocomplete(input, results, place => {
-            routeStops[index].text = input.value;
-            routeStops[index].place = place;
+        // A stop is filled from the search bar or by pointing at the map, never
+        // by typing here. One search field beats four half-working ones.
+        const slot = document.createElement("button");
+        slot.type = "button";
+        slot.className = "stop-slot" + (stop.text ? "" : " is-empty");
+        slot.textContent = stop.text || stopPlaceholder(index);
+        slot.title = stop.text
+            ? stop.text + " — click to search for a replacement"
+            : "Search above, or use ◎ to click it on the map";
+        slot.setAttribute("aria-label", "Stop " + stopLabel(index) + ": " + (stop.text || "empty"));
+        slot.addEventListener("click", () => {
+            const search = $("search-input");
+            search.focus();
+            search.select();
+            toast("Search for a place, then press + " + stopLabel(index));
         });
+        // Keyboard equivalent of the drag handle, which is mouse-only.
+        slot.addEventListener("keydown", event => {
+            if (!event.altKey) return;
+            if (event.key !== "ArrowUp" && event.key !== "ArrowDown") return;
+            event.preventDefault();
+            const to = index + (event.key === "ArrowUp" ? -1 : 1);
+            moveStop(index, to);
+            const moved = document.querySelectorAll("#stop-list .stop-slot")[Math.max(0, Math.min(to, routeStops.length - 1))];
+            if (moved) moved.focus();
+        });
+        row.appendChild(slot);
+
+        // Point at the map instead.
+        const pick = document.createElement("button");
+        pick.className = "stop-pick" + (mapPickTarget === index ? " active" : "");
+        pick.type = "button";
+        pick.textContent = "\u25CE";
+        pick.title = "Set this stop by clicking the map";
+        pick.setAttribute("aria-label", pick.title);
+        pick.addEventListener("click", () => setMapPick(mapPickTarget === index ? null : index));
+        row.appendChild(pick);
 
         const remove = document.createElement("button");
         remove.className = "stop-remove";
-        remove.textContent = "×";
+        remove.textContent = "\u00D7";
         remove.setAttribute("aria-label", "Remove this stop");
         remove.disabled = routeStops.length <= 2;
         remove.addEventListener("click", () => { routeStops.splice(index, 1); renderStops(); });
