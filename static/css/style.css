@@ -1405,8 +1405,15 @@ body.map-picking .leaflet-container { cursor: crosshair; }
     border: 1px solid var(--border);
     border-radius: 100px;
     box-shadow: var(--shadow-panel);
-    overflow: hidden;
+    /* Stay within the gap between the two side panels so a wide readout can
+       never grow over them; scroll internally in the rare case it still does.
+       Same bound the stealth banner and topbar search use. */
+    max-width: calc(100vw - 2 * var(--panel-w) - 60px);
+    overflow-x: auto;
+    overflow-y: hidden;
+    scrollbar-width: none;
 }
+#status-bar::-webkit-scrollbar { display: none; }
 
 .status-pill {
     display: flex;
@@ -1479,10 +1486,16 @@ body.map-picking .leaflet-container { cursor: crosshair; }
 #map-controls {
     position: fixed;
     right: calc(var(--panel-w) + 24px);
-    bottom: 12px;
+    /* A vertical stack on the free map edge, just left of the panel and centred
+       between the topbar and the bottom. The old bottom-right spot collided
+       with the centred status bar once it carried the richer speed/ETA readout;
+       the top-centre is taken by the stealth banner. The mid-right edge is the
+       one lane clear of the banner, the status bar, and both side panels. */
+    top: 50%;
+    transform: translateY(-50%);
     z-index: 800;
     display: flex;
-    flex-direction: row;
+    flex-direction: column;
     gap: 5px;
 }
 
@@ -1925,6 +1938,7 @@ kbd {
         top: calc(var(--topbar-h) + 10px);
         right: 12px;
         bottom: auto;
+        transform: none;
         flex-direction: row;
     }
     #panel-location { margin-top: calc(var(--topbar-h) + 56px); }

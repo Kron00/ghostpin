@@ -53,9 +53,11 @@ let speedUpdateTimer = null;
 const KMH_PER_MPH = 1.609344;
 
 function routeFollowZoomForSpeed(speed) {
-    if (speed <= 7) return 18;
-    if (speed <= 25) return 17;
-    return 16;
+    // Close enough to watch the dot actually move. Tiles go to 19, so even the
+    // fast tier stays tight rather than pulling out to a city view.
+    if (speed <= 30) return 18;
+    if (speed <= 70) return 17;
+    return 17;
 }
 
 function displaySpeedFromKmh(speedKmh) {
@@ -1216,8 +1218,25 @@ let roamCircle = null;
 let roamUnitMiles = localStorage.getItem("roam_unit") === "mi" ? true
                   : (localStorage.getItem("roam_unit") === "km" ? false : null);
 let roamActive = false;
+let roamRetryTimer = null;
 
 const METRES_PER_MILE = 1609.344;
+
+// Roam is meant to run until the user clicks Stop. A hiccup while stitching the
+// next tour — a network blip, or a random scatter that finds no roads — must not
+// end it: keep roaming alive and retry shortly. Only a failure on the very first
+// tour (the user is watching and can adjust) or an explicit Stop ends it.
+function failRoam(silent, message) {
+    if (silent && roamActive) {
+        updateRoamUI();
+        clearTimeout(roamRetryTimer);
+        roamRetryTimer = setTimeout(() => { if (roamActive) continueRoaming(); }, 3000);
+        return;
+    }
+    roamActive = false;
+    updateRoamUI();
+    toast(message, "error");
+}
 
 function roamRadiusMetres() {
     const value = parseFloat($("roam-radius").value);
@@ -1273,7 +1292,7 @@ async function startRoaming(silent = false, fromLocation = null) {
             body: JSON.stringify(routeRequest)
         });
         const data = await r.json();
-        if (!r.ok) { roamActive = false; updateRoamUI(); return toast(data.error || "Could not find roads there", "error"); }
+        if (!r.ok) { return failRoam(silent, data.error || "Could not find roads there"); }
 
         const start = await fetch("/api/route/start", {
             method: "POST", headers: { "Content-Type": "application/json" },
@@ -1285,19 +1304,25 @@ async function startRoaming(silent = false, fromLocation = null) {
             })
         });
         const started = await start.json();
-        if (!start.ok) { roamActive = false; updateRoamUI(); return toast(started.error || "Could not start roaming", "error"); }
+        if (!start.ok) { return failRoam(silent, started.error || "Could not start roaming"); }
 
         roamActive = true;
         updateRoamUI();
         drawRoamPath(data.coordinates);
         clearInterval(routePolling);
         routePolling = setInterval(pollRoute, 1000);
+        // Follow the dot up close on the first tour, like a route does. Later
+        // tours (silent) leave the view alone so a manual zoom-out is not undone.
+        if (!silent) {
+            followMode = true;
+            if ($("follow-mode")) $("follow-mode").checked = true;
+            const roamStart = data.coordinates?.[0] ? [data.coordinates[0][1], data.coordinates[0][0]] : null;
+            if (roamStart) { map.stop(); map.setView(roamStart, routeFollowZoomForSpeed(speed), { animate: false }); }
+        }
         startMovementTracking();
         if (!silent) toast("Roaming " + data.distance_km + " km of roads");
     } catch (e) {
-        roamActive = false;
-        updateRoamUI();
-        toast("Could not start roaming", "error");
+        failRoam(silent, "Could not start roaming");
     }
 }
 
@@ -1330,6 +1355,7 @@ async function continueRoaming() {
 
 async function stopRoaming() {
     roamActive = false;
+    clearTimeout(roamRetryTimer);
     try { await fetch("/api/route/stop", { method: "POST" }); } catch (e) { /* already stopped */ }
     try { await fetch("/api/wander/stop", { method: "POST" }); } catch (e) { /* legacy */ }
     if (roamPathLine) { map.removeLayer(roamPathLine); roamPathLine = null; }
@@ -1647,22 +1673,26 @@ function renderRouteSpeedStatus(data, targetOverride = null) {
     const override = finiteNumber(targetOverride);
     const targetSpeed = override == null ? reportedTarget : override;
     const routeAdaptive = typeof data.adaptive === "boolean" ? data.adaptive : adaptiveSpeed;
+    // Keep the HUD compact so the centred bar stays inside the gap between the
+    // panels: current/target as "34 / 60 mph", or "Stopped" at a hold. The
+    // wordy "Current … · Target …" form grew the bar into the map controls.
+    const unit = speedUnitOrDefault() === "mph" ? "mph" : "km/h";
     if (currentSpeed != null) {
-        // Older servers have only speed_kmh. Keep their compact readout until
-        // the richer status fields arrive instead of inventing missing values.
+        // Older servers have only speed_kmh — no target/holding/adaptive fields.
         if (targetSpeed == null && typeof data.holding !== "boolean" && typeof data.adaptive !== "boolean") {
-            statusSpeed.textContent = formatSpeed(currentSpeed) + (adaptiveSpeed ? " · adaptive" : "");
+            statusSpeed.textContent = formatSpeed(currentSpeed);
             return;
         }
-        const speedParts = [data.holding === true ? "Stopped briefly" : "Current " + formatSpeed(currentSpeed)];
-        if (targetSpeed != null) speedParts.push("Target " + formatSpeed(targetSpeed));
-        if (routeAdaptive) speedParts.push("Adaptive cap");
-        statusSpeed.textContent = speedParts.join(" · ");
+        if (data.holding === true) {
+            statusSpeed.textContent = "Stopped";
+        } else if (targetSpeed != null) {
+            statusSpeed.textContent = displaySpeedFromKmh(currentSpeed) + " / "
+                + displaySpeedFromKmh(targetSpeed) + " " + unit;
+        } else {
+            statusSpeed.textContent = formatSpeed(currentSpeed);
+        }
     } else if (data.holding === true) {
-        const speedParts = ["Stopped briefly"];
-        if (targetSpeed != null) speedParts.push("Target " + formatSpeed(targetSpeed));
-        if (routeAdaptive) speedParts.push("Adaptive cap");
-        statusSpeed.textContent = speedParts.join(" · ");
+        statusSpeed.textContent = "Stopped";
     }
 }
 
@@ -1686,10 +1716,11 @@ async function pollRoute() {
         if (eta == null && durationMin != null && durationMin >= 0) {
             eta = formatEtaSeconds(durationMin * 60 * (1 - progress / 100));
         }
+        // Distance remaining, live ETA, and percent — enough to read at a
+        // glance. The planned total is shown when the route is calculated, so
+        // repeating it here only widened the bar into the map controls.
         const routeParts = [formatRouteDistance(remaining) + " left"];
         if (eta != null) routeParts.push("ETA " + eta);
-        const planned = durationMin == null ? null : formatEtaSeconds(durationMin * 60);
-        if (planned != null) routeParts.push(planned + " planned");
         routeParts.push(Math.round(progress) + "%");
         $("status-route-text").textContent = routeParts.join(" · ");
     }
