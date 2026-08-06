@@ -8,7 +8,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 
 import requests as http_requests
-from flask import Flask, jsonify, request, render_template
+from flask import Flask, jsonify, request, render_template, send_from_directory
 
 from device_manager import DeviceManager
 from location_service import LocationService
@@ -113,6 +113,12 @@ def index():
     return render_template("index.html")
 
 
+@app.route("/favicon.ico")
+def favicon():
+    # Browsers ask for this unprompted; without it every load logs a 404.
+    return send_from_directory(app.static_folder, "icon.png", mimetype="image/png")
+
+
 # ── Device API ─────────────────────────────────────────────────
 
 @app.route("/api/device")
@@ -177,9 +183,9 @@ def api_device_connect():
 
         try:
             if device_mgr.device_info.get("connected"):
-                info = device_mgr.reconnect(udid=udid, prefer_wifi=prefer_wifi, retries=5)
+                info = device_mgr.reconnect(udid=udid, prefer_wifi=prefer_wifi, retries=3)
             else:
-                info = device_mgr.connect(udid=udid, prefer_wifi=prefer_wifi, retries=5)
+                info = device_mgr.connect(udid=udid, prefer_wifi=prefer_wifi, retries=3)
 
             loc_svc = LocationService(device_mgr.simulator, device_mgr.bridge)
             _start_schedule_checker()
@@ -418,7 +424,7 @@ def api_clear_location():
 @app.route("/api/location/current")
 def api_current_location():
     if loc_svc is None:
-        return jsonify({"error": "Not connected"}), 503
+        return jsonify({"error": "No iPhone connected. Plug it in, unlock it, and try again."}), 503
     loc = loc_svc.get_current()
     if loc is None:
         return jsonify({"error": "No location set"}), 404
@@ -1358,7 +1364,7 @@ def api_route_resume():
 @app.route("/api/route/status")
 def api_route_status():
     if loc_svc is None:
-        return jsonify({"error": "Not connected"}), 503
+        return jsonify({"error": "No iPhone connected. Plug it in, unlock it, and try again."}), 503
     status = loc_svc.get_route_status()
     if status is None:
         return jsonify({"error": "No route active"}), 404
@@ -1448,7 +1454,7 @@ def api_gpx_import():
 @app.route("/api/gpx/export")
 def api_gpx_export():
     if loc_svc is None:
-        return jsonify({"error": "Not connected"}), 503
+        return jsonify({"error": "No iPhone connected. Plug it in, unlock it, and try again."}), 503
     name = request.args.get("name", "Ghostpin Route")
     gpx_str = loc_svc.export_gpx(name)
     return app.response_class(gpx_str, mimetype="application/gpx+xml",
@@ -1471,7 +1477,7 @@ def api_saved_list():
 @app.route("/api/saved", methods=["POST"])
 def api_saved_add():
     if loc_svc is None:
-        return jsonify({"error": "Not connected"}), 503
+        return jsonify({"error": "No iPhone connected. Plug it in, unlock it, and try again."}), 503
     data = request.json or {}
     name = data.get("name", "").strip()
     if not name:
@@ -1489,7 +1495,7 @@ def api_saved_add():
 @app.route("/api/saved/<path:name>", methods=["DELETE"])
 def api_saved_delete(name):
     if loc_svc is None:
-        return jsonify({"error": "Not connected"}), 503
+        return jsonify({"error": "No iPhone connected. Plug it in, unlock it, and try again."}), 503
     return jsonify(loc_svc.delete_location(name))
 
 
@@ -1512,7 +1518,7 @@ def api_history():
 @app.route("/api/history", methods=["DELETE"])
 def api_history_clear():
     if loc_svc is None:
-        return jsonify({"error": "Not connected"}), 503
+        return jsonify({"error": "No iPhone connected. Plug it in, unlock it, and try again."}), 503
     return jsonify(loc_svc.clear_history())
 
 
@@ -1528,7 +1534,7 @@ def api_routes_list():
 @app.route("/api/routes", methods=["POST"])
 def api_routes_save():
     if loc_svc is None:
-        return jsonify({"error": "Not connected"}), 503
+        return jsonify({"error": "No iPhone connected. Plug it in, unlock it, and try again."}), 503
     data = request.json or {}
     name = data.get("name", "").strip()
     if not name:
@@ -1545,7 +1551,7 @@ def api_routes_save():
 @app.route("/api/routes/<route_id>", methods=["DELETE"])
 def api_routes_delete(route_id):
     if loc_svc is None:
-        return jsonify({"error": "Not connected"}), 503
+        return jsonify({"error": "No iPhone connected. Plug it in, unlock it, and try again."}), 503
     return jsonify(loc_svc.delete_route(route_id))
 
 
@@ -1561,7 +1567,7 @@ def api_profiles_list():
 @app.route("/api/profiles", methods=["POST"])
 def api_profiles_save():
     if loc_svc is None:
-        return jsonify({"error": "Not connected"}), 503
+        return jsonify({"error": "No iPhone connected. Plug it in, unlock it, and try again."}), 503
     data = request.json or {}
     name = data.get("name", "").strip()
     if not name:
@@ -1583,7 +1589,7 @@ def api_profiles_load(name):
 @app.route("/api/profiles/<path:name>", methods=["DELETE"])
 def api_profiles_delete(name):
     if loc_svc is None:
-        return jsonify({"error": "Not connected"}), 503
+        return jsonify({"error": "No iPhone connected. Plug it in, unlock it, and try again."}), 503
     return jsonify(loc_svc.delete_profile(name))
 
 
@@ -1599,7 +1605,7 @@ def api_schedules_list():
 @app.route("/api/schedules", methods=["POST"])
 def api_schedules_create():
     if loc_svc is None:
-        return jsonify({"error": "Not connected"}), 503
+        return jsonify({"error": "No iPhone connected. Plug it in, unlock it, and try again."}), 503
     data = request.json or {}
     name = data.get("name", "").strip()
     if not name:
@@ -1617,14 +1623,14 @@ def api_schedules_create():
 @app.route("/api/schedules/<schedule_id>", methods=["DELETE"])
 def api_schedules_delete(schedule_id):
     if loc_svc is None:
-        return jsonify({"error": "Not connected"}), 503
+        return jsonify({"error": "No iPhone connected. Plug it in, unlock it, and try again."}), 503
     return jsonify(loc_svc.delete_schedule(schedule_id))
 
 
 @app.route("/api/schedules/<schedule_id>/toggle", methods=["POST"])
 def api_schedules_toggle(schedule_id):
     if loc_svc is None:
-        return jsonify({"error": "Not connected"}), 503
+        return jsonify({"error": "No iPhone connected. Plug it in, unlock it, and try again."}), 503
     data = request.json or {}
     return jsonify(loc_svc.toggle_schedule(schedule_id, data.get("enabled", True)))
 

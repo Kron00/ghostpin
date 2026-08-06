@@ -189,6 +189,7 @@ document.addEventListener("DOMContentLoaded", async () => {
     $("btn-set").addEventListener("click", setLocation);
     $("btn-clear").addEventListener("click", clearLocation);
     $("btn-paste").addEventListener("click", pasteCoords);
+    ["lat-input", "lon-input"].forEach(id => $(id).addEventListener("input", syncReadoutFromInputs));
     $("btn-route-start").addEventListener("click", startRoute);
     $("btn-route-stop").addEventListener("click", stopRoute);
     $("btn-route-pause").addEventListener("click", pauseRoute);
@@ -232,7 +233,11 @@ document.addEventListener("DOMContentLoaded", async () => {
         const metres = roamRadiusMetres();
         roamUnitMiles = roamUnitMiles === false;
         localStorage.setItem("roam_unit", roamUnitMiles ? "mi" : "km");
-        if (metres) $("roam-radius").value = (roamUnitMiles ? metres / METRES_PER_MILE : metres / 1000).toFixed(2);
+        if (metres) {
+            const converted = roamUnitMiles ? metres / METRES_PER_MILE : metres / 1000;
+            const step = parseFloat($("roam-radius-slider").step) || 0.05;
+            $("roam-radius").value = (Math.round(converted / step) * step).toFixed(2);
+        }
         setRoamUnitBounds(); syncRoamRadius("field");
     });
     setRoamUnitBounds();
@@ -344,6 +349,11 @@ document.addEventListener("DOMContentLoaded", async () => {
 
     // Device dropdown & connect buttons
     $("device-badge").addEventListener("click", toggleDeviceDropdown);
+    $("device-badge").addEventListener("keydown", event => {
+        if (event.key !== "Enter" && event.key !== " ") return;
+        event.preventDefault();
+        $("device-badge").click();
+    });
     $("btn-connect").addEventListener("click", () => connectDevice(false));
     $("btn-connect-wifi").addEventListener("click", () => connectDevice(true));
 
@@ -449,6 +459,29 @@ function toggleCoordFormat() {
 }
 function toDMS(deg, isLon) { const dir = isLon ? (deg >= 0 ? "E" : "W") : (deg >= 0 ? "N" : "S"); deg = Math.abs(deg); const d = Math.floor(deg); const m = Math.floor((deg - d) * 60); const s = ((deg - d - m / 60) * 3600).toFixed(1); return d + "\u00B0" + m + "'" + s + '"' + dir; }
 let lastCoords = null;
+
+// Keep the readout honest while the fields are being edited by hand.
+function syncReadoutFromInputs() {
+    const readout = $("coord-text");
+    if (!readout) return;
+    const latRaw = $("lat-input").value.trim();
+    const lonRaw = $("lon-input").value.trim();
+    if (!latRaw && !lonRaw) {
+        readout.textContent = "Click the map to set a location";
+        readout.classList.remove("coord-glow");
+        lastCoords = null;
+        return;
+    }
+    const lat = parseFloat(latRaw), lon = parseFloat(lonRaw);
+    // In DMS the fields hold text the readout cannot render; leave it be
+    // rather than showing something wrong.
+    if (coordFormat !== "dd" || Number.isNaN(lat) || Number.isNaN(lon)) return;
+    if (Math.abs(lat) > 90 || Math.abs(lon) > 180) return;
+    readout.textContent = lat.toFixed(6) + ", " + lon.toFixed(6);
+    readout.classList.add("coord-glow");
+    lastCoords = { lat, lng: lon };
+}
+
 
 // A number input silently drops 48°51'29.7"N, so the field type has to follow
 // the coordinate format.
@@ -927,8 +960,8 @@ let routeStops = [{ text: "", place: null }, { text: "", place: null }];
 function stopLabel(index) { return String.fromCharCode(65 + index); }
 
 function stopPlaceholder(index) {
-    if (index === 0) return "Start — search or pick";
-    if (index === routeStops.length - 1) return "Destination — search or pick";
+    if (index === 0) return "Start";
+    if (index === routeStops.length - 1) return "Destination";
     return "Stop " + stopLabel(index);
 }
 
