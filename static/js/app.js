@@ -583,7 +583,7 @@ function coordsInRange(lat, lon) {
 async function teleportTo(lat, lon) {
     if (!coordsInRange(lat, lon)) return toast("Latitude must be within ±90 and longitude within ±180", "error");
     storePreviousLocation();
-    try { const r = await fetch("/api/location/set", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ lat, lon }) }); if (r.ok) { activeSpoofLocation = { lat, lon }; toast("Teleported to " + lat.toFixed(4) + ", " + lon.toFixed(4)); addToRecent(lat, lon); _stealthDismissed = false; checkStealth(); } else { const d = await r.json(); toast(d.error || "Failed", "error"); } } catch (e) { toast("Connection error", "error"); }
+    try { const r = await fetch("/api/location/set", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ lat, lon }) }); if (r.ok) { activeSpoofLocation = { lat, lon }; adoptDotAsRoamCentre(true); toast("Teleported to " + lat.toFixed(4) + ", " + lon.toFixed(4)); addToRecent(lat, lon); _stealthDismissed = false; checkStealth(); } else { const d = await r.json(); toast(d.error || "Failed", "error"); } } catch (e) { toast("Connection error", "error"); }
 }
 
 // ── Location set/clear ──────────────────────────────────────
@@ -594,7 +594,7 @@ async function setLocation() {
     // reject it after a round trip.
     if (!coordsInRange(lat, lon)) return toast("Latitude must be within ±90 and longitude within ±180", "error");
     storePreviousLocation();
-    try { const r = await fetch("/api/location/set", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ lat, lon }) }); const d = await r.json(); if (r.ok) { activeSpoofLocation = { lat, lon }; toast("Location set: " + lat.toFixed(4) + ", " + lon.toFixed(4)); placeMarker(lat, lon); addToRecent(lat, lon); _stealthDismissed = false; checkStealth(); } else toast(d.error || "Failed", "error"); } catch (e) { toast("Connection error", "error"); }
+    try { const r = await fetch("/api/location/set", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ lat, lon }) }); const d = await r.json(); if (r.ok) { activeSpoofLocation = { lat, lon }; adoptDotAsRoamCentre(true); toast("Location set: " + lat.toFixed(4) + ", " + lon.toFixed(4)); placeMarker(lat, lon); addToRecent(lat, lon); _stealthDismissed = false; checkStealth(); } else toast(d.error || "Failed", "error"); } catch (e) { toast("Connection error", "error"); }
 }
 
 async function clearLocation() {
@@ -605,7 +605,7 @@ async function clearLocation() {
 function storePreviousLocation() { if (activeSpoofLocation) { previousLocation = { ...activeSpoofLocation }; $("btn-undo").disabled = false; $("btn-undo").title = "Undo to " + previousLocation.lat.toFixed(4) + ", " + previousLocation.lon.toFixed(4); } }
 async function undoTeleport() {
     if (!previousLocation) return toast("No previous location", "error");
-    try { const r = await fetch("/api/location/set", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(previousLocation) }); if (r.ok) { activeSpoofLocation = { ...previousLocation }; toast("Undone \u2014 back to " + previousLocation.lat.toFixed(4) + ", " + previousLocation.lon.toFixed(4)); placeMarker(previousLocation.lat, previousLocation.lon); map.flyTo([previousLocation.lat, previousLocation.lon], map.getZoom(), { duration: 0.8 }); previousLocation = null; $("btn-undo").disabled = true; $("btn-undo").title = "No previous location"; _stealthDismissed = false; checkStealth(); } } catch (e) { toast("Undo failed", "error"); }
+    try { const r = await fetch("/api/location/set", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(previousLocation) }); if (r.ok) { activeSpoofLocation = { ...previousLocation }; adoptDotAsRoamCentre(true); toast("Undone \u2014 back to " + previousLocation.lat.toFixed(4) + ", " + previousLocation.lon.toFixed(4)); placeMarker(previousLocation.lat, previousLocation.lon); map.flyTo([previousLocation.lat, previousLocation.lon], map.getZoom(), { duration: 0.8 }); previousLocation = null; $("btn-undo").disabled = true; $("btn-undo").title = "No previous location"; _stealthDismissed = false; checkStealth(); } } catch (e) { toast("Undo failed", "error"); }
 }
 
 // ── Paste ───────────────────────────────────────────────────
@@ -1264,6 +1264,27 @@ function setRoamCentre(lat, lon) {
     updateRoamUI();
 }
 
+// The location already on the map is the obvious roam centre. Return it from the
+// live spoof, or failing that the coordinate inputs, so a placed dot need not be
+// picked a second time.
+function placedLocation() {
+    if (activeSpoofLocation && Number.isFinite(activeSpoofLocation.lat) && Number.isFinite(activeSpoofLocation.lon))
+        return { lat: activeSpoofLocation.lat, lon: activeSpoofLocation.lon };
+    const lat = parseFloat($("lat-input").value), lon = parseFloat($("lon-input").value);
+    if (Number.isFinite(lat) && Number.isFinite(lon)) return { lat, lon };
+    return null;
+}
+
+// Fill the roam centre from the placed dot. `force` overrides an existing centre
+// (a fresh placement wins); without it, only an empty centre is filled (opening
+// the tab). Never while a route or roam runs, so a moving dot cannot drag it.
+function adoptDotAsRoamCentre(force = false) {
+    if (roamActive || routePolling) return;
+    if (!force && roamCentre) return;
+    const p = placedLocation();
+    if (p) setRoamCentre(p.lat, p.lon);
+}
+
 function updateRoamUI() {
     const ready = !!roamCentre && !!roamRadiusMetres();
     $("btn-roam-start").disabled = !ready || roamActive;
@@ -1272,6 +1293,8 @@ function updateRoamUI() {
 }
 
 async function startRoaming(silent = false, fromLocation = null) {
+    // A placed dot stands in for a centre that was never explicitly picked.
+    if (!silent) adoptDotAsRoamCentre();
     const radius = roamRadiusMetres();
     if (!roamCentre || !radius) return toast("Pick a centre and a radius first", "error");
     const speed = readSpeedKmh() || selectedSpeed;
@@ -1540,7 +1563,10 @@ function setBuildMode(mode) {
         pane.classList.toggle("active", pane.id === "build-" + mode);
     });
     if (mode === "roam") {
-        $("route-hint").textContent = "Pick a centre and a radius, then start roaming.";
+        adoptDotAsRoamCentre();
+        $("route-hint").textContent = roamCentre
+            ? "Centred on your placed location. Set a radius, then start roaming."
+            : "Pick a centre and a radius, then start roaming.";
     } else {
         updateRouteUI();
     }
