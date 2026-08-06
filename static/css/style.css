@@ -1917,13 +1917,17 @@ kbd {
     #toasts { right: 12px; left: 12px; align-items: center; }
     #coord-hud { display: none; }
     /* Panels are full width and in normal flow here, so anything pinned to the
-       viewport sits on top of them. Let these flow as well. */
+       bottom of the viewport sits on top of them. Park these in the gap above
+       the first panel instead: visible without scrolling, overlapping nothing.
+       They come last in the DOM, so they must be positioned rather than flowed. */
     #map-controls {
-        position: static;
+        position: absolute;
+        top: calc(var(--topbar-h) + 10px);
+        right: 12px;
+        bottom: auto;
         flex-direction: row;
-        justify-content: flex-end;
-        margin: 0 12px 16px;
     }
+    #panel-location { margin-top: calc(var(--topbar-h) + 56px); }
 }
 
 /* ── Speed field, roam slider, and the builder help ──────────── */

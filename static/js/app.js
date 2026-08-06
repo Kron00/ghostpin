@@ -205,6 +205,7 @@ document.addEventListener("DOMContentLoaded", async () => {
     $("close-loop").addEventListener("change", event => {
         closeLoop = event.target.checked;
         renderStopsOnMap();
+        invalidateCalculatedRoute();
         updateRouteUI();
     });
     $("btn-adaptive").addEventListener("click", () => {
@@ -794,7 +795,8 @@ async function loadSaved() {
 }
 
 // ── Inline save form ────────────────────────────────────────
-function showSaveForm() { const lat = parseFloat($("lat-input").value), lon = parseFloat($("lon-input").value); if (isNaN(lat) || isNaN(lon)) return toast("Place a marker first", "error"); $("save-form").classList.remove("hidden"); $("save-name").value = ""; $("save-name").focus(); }
+function showSaveForm() {
+    setTimeout(() => revealForm("save-form"), 0); const lat = parseFloat($("lat-input").value), lon = parseFloat($("lon-input").value); if (isNaN(lat) || isNaN(lon)) return toast("Place a marker first", "error"); $("save-form").classList.remove("hidden"); $("save-name").value = ""; $("save-name").focus(); }
 async function confirmSaveLocation() { const name = $("save-name").value.trim(); if (!name) return toast("Enter a name", "error"); const lat = parseFloat($("lat-input").value), lon = parseFloat($("lon-input").value); const cat = document.querySelector(".cat-pill.active")?.dataset.cat || "default"; try { const r = await fetch("/api/saved", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ name, lat, lon, category: cat }) }); if (r.ok) { loadSaved(); toast('Saved "' + name + '"'); $("save-form").classList.add("hidden"); } else { const d = await r.json(); toast(d.error || "Failed", "error"); } } catch (e) { toast("Connection error", "error"); } }
 
 // ── Route / Movement ────────────────────────────────────────
@@ -819,6 +821,7 @@ function clearRoutePoints() {
     renderStops();
     const addressStatus = $("route-address-status");
     if (addressStatus) { addressStatus.textContent = ""; addressStatus.className = "route-address-status hidden"; }
+    $("route-save-form")?.classList.add("hidden");
     updateRouteUI();
 }
 function updateRouteUI() {
@@ -924,8 +927,8 @@ let routeStops = [{ text: "", place: null }, { text: "", place: null }];
 function stopLabel(index) { return String.fromCharCode(65 + index); }
 
 function stopPlaceholder(index) {
-    if (index === 0) return "Start address or place";
-    if (index === routeStops.length - 1) return "Destination address or place";
+    if (index === 0) return "Start — search or pick";
+    if (index === routeStops.length - 1) return "Destination — search or pick";
     return "Stop " + stopLabel(index);
 }
 
@@ -934,7 +937,10 @@ function setStopFromPlace(index, place) {
     if (index < 0 || index >= routeStops.length) return;
     const label = place.name || place.display_name;
     routeStops[index] = { text: label, place };
-    setBuildMode("stops");
+    invalidateCalculatedRoute();
+    // Jumping to Stops mid-pick hides the "Stop picking" control while it is
+    // still armed, so stay put while appending from the map.
+    if (mapPickTarget !== "append") setBuildMode("stops");
     renderStops();
     // Draw it, but leave the view exactly where it was: moving the map out
     // from under someone mid-plan is disorienting.
@@ -1051,11 +1057,25 @@ function renderStopsOnMap(fit = false) {
     }
 }
 
+// Any change to the stops makes a previously calculated road route wrong.
+// Leaving it in place means Start drives the route you just edited away from.
+function invalidateCalculatedRoute() {
+    if (!calculatedRouteCoordinates) return;
+    calculatedRouteCoordinates = null;
+    calculatedRouteProvider = null;
+    routeDistanceKm = 0;
+    if (routeDisplayLine) { map.removeLayer(routeDisplayLine); routeDisplayLine = null; }
+    const status = $("route-address-status");
+    if (status) { status.textContent = ""; status.className = "route-address-status hidden"; }
+    updateRouteUI();
+}
+
 function moveStop(from, to) {
     if (to < 0 || to >= routeStops.length || from === to) return;
     const [moved] = routeStops.splice(from, 1);
     routeStops.splice(to, 0, moved);
     renderStops();
+    invalidateCalculatedRoute();
 }
 
 
@@ -1354,7 +1374,7 @@ function renderStops() {
         remove.textContent = "\u00D7";
         remove.setAttribute("aria-label", "Remove this stop");
         remove.disabled = routeStops.length <= 2;
-        remove.addEventListener("click", () => { routeStops.splice(index, 1); renderStops(); });
+        remove.addEventListener("click", () => { routeStops.splice(index, 1); renderStops(); invalidateCalculatedRoute(); });
         row.appendChild(remove);
 
         list.appendChild(row);
@@ -1367,6 +1387,7 @@ function renderStops() {
 function addStop() {
     if (routeStops.length >= 10) return toast("A route can have at most 10 stops", "error");
     routeStops.push({ text: "", place: null });
+    invalidateCalculatedRoute();
     renderStops();
 }
 
@@ -1600,8 +1621,15 @@ async function loadProfiles() {
     profiles.forEach(p => { const item = document.createElement("div"); item.className = "saved-item"; const n = document.createElement("span"); n.className = "saved-name"; n.textContent = p.name; const co = document.createElement("span"); co.className = "saved-coords"; co.textContent = (p.lat != null ? p.lat.toFixed(2) : "--") + ", " + (p.lon != null ? p.lon.toFixed(2) : "--"); const del = document.createElement("button"); del.className = "saved-del"; del.title = "Delete"; del.textContent = "\u00D7"; del.addEventListener("click", async e => { e.stopPropagation(); await fetch("/api/profiles/" + encodeURIComponent(p.name), { method: "DELETE" }); loadProfiles(); toast('Deleted "' + p.name + '"'); }); item.appendChild(n); item.appendChild(co); item.appendChild(del); item.addEventListener("click", async e => { if (e.target.classList.contains("saved-del")) return; try { const r2 = await fetch("/api/profiles/" + encodeURIComponent(p.name) + "/load", { method: "POST" }); const d = await r2.json(); if (r2.ok) { toast('Profile "' + p.name + '" loaded'); if (d.profile?.lat != null) { placeMarker(d.profile.lat, d.profile.lon); map.flyTo([d.profile.lat, d.profile.lon], 15); } } else toast(d.error || "Failed", "error"); } catch (e2) { toast("Error", "error"); } }); c.appendChild(item); });
     } catch (e) {}
 }
+function revealForm(id) {
+    const form = $(id);
+    if (!form) return;
+    const anchor = form.querySelector(".btn-group") || form;
+    anchor.scrollIntoView({ block: "nearest" });
+}
+
 function showProfileForm() { $("profile-form").classList.remove("hidden");
-    $("profile-form").scrollIntoView({ block: "nearest", behavior: "smooth" }); $("profile-name").value = ""; $("profile-name").focus(); }
+    revealForm("profile-form"); $("profile-name").value = ""; $("profile-name").focus(); }
 async function confirmSaveProfile() { const name = $("profile-name").value.trim(); if (!name) return toast("Enter a name", "error"); const lat = parseFloat($("lat-input").value), lon = parseFloat($("lon-input").value); try { const r = await fetch("/api/profiles", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ name, lat: isNaN(lat) ? null : lat, lon: isNaN(lon) ? null : lon, speed: readSpeedKmh() || selectedSpeed, route_mode: $("route-mode").value }) }); if (r.ok) { loadProfiles(); toast('Profile "' + name + '" saved'); $("profile-form").classList.add("hidden"); } else { const d = await r.json(); toast(d.error || "Failed", "error"); } } catch (e) { toast("Error", "error"); } }
 
 // ── Schedules ───────────────────────────────────────────────
@@ -1611,7 +1639,8 @@ async function loadSchedules() {
     schedules.forEach(s => { const item = document.createElement("div"); item.className = "saved-item"; const n = document.createElement("span"); n.className = "saved-name"; const dayLabel = s.days?.length ? s.days.map(d => d[0].toUpperCase() + d.slice(1)).join(", ") : "Daily"; n.textContent = s.name + " @ " + s.time; const co = document.createElement("span"); co.className = "saved-coords"; co.textContent = dayLabel + " · " + s.lat.toFixed(2) + ", " + s.lon.toFixed(2); const del = document.createElement("button"); del.className = "saved-del"; del.title = "Delete"; del.textContent = "\u00D7"; del.addEventListener("click", async e => { e.stopPropagation(); await fetch("/api/schedules/" + encodeURIComponent(s.id), { method: "DELETE" }); loadSchedules(); toast("Schedule deleted"); }); item.appendChild(n); item.appendChild(co); item.appendChild(del); c.appendChild(item); });
     } catch (e) {}
 }
-function showScheduleForm() { const lat = parseFloat($("lat-input").value), lon = parseFloat($("lon-input").value); if (isNaN(lat) || isNaN(lon)) return toast("Set a location first", "error"); $("schedule-form").classList.remove("hidden"); $("schedule-name").value = ""; $("schedule-name").focus(); }
+function showScheduleForm() { const lat = parseFloat($("lat-input").value), lon = parseFloat($("lon-input").value); if (isNaN(lat) || isNaN(lon)) return toast("Set a location first", "error"); $("schedule-form").classList.remove("hidden");
+    setTimeout(() => revealForm("schedule-form"), 0); $("schedule-name").value = ""; $("schedule-name").focus(); }
 async function confirmAddSchedule() { const name = $("schedule-name").value.trim(); if (!name) return toast("Enter a name", "error"); const time = $("schedule-time").value; if (!time) return toast("Set a time", "error"); const lat = parseFloat($("lat-input").value), lon = parseFloat($("lon-input").value); const days = Array.from(document.querySelectorAll(".day-pill.active")).map(p => p.dataset.day); try { const r = await fetch("/api/schedules", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ name, lat, lon, time, days }) }); if (r.ok) { loadSchedules(); toast("Schedule created"); $("schedule-form").classList.add("hidden"); } else { const d = await r.json(); toast(d.error || "Failed", "error"); } } catch (e) { toast("Error", "error"); } }
 
 // ── Route History ───────────────────────────────────────────
