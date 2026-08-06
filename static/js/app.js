@@ -1546,9 +1546,24 @@ async function stopRoute() {
 async function pauseRoute() { try { await fetch("/api/route/pause", { method: "POST" }); $("btn-route-pause").classList.add("hidden"); $("btn-route-resume").classList.remove("hidden"); toast("Route paused"); } catch (e) { toast("Failed", "error"); } }
 async function resumeRoute() { try { await fetch("/api/route/resume", { method: "POST" }); $("btn-route-resume").classList.add("hidden"); $("btn-route-pause").classList.remove("hidden"); toast("Route resumed"); } catch (e) { toast("Failed", "error"); } }
 
+// The planned line stays put; a brighter line grows over it as the phone
+// covers ground, so progress is legible on the map itself.
+function drawTravelled(pct) {
+    if (!calculatedRouteCoordinates || !(pct > 0)) return;
+    const coords = calculatedRouteCoordinates;
+    const upto = Math.max(2, Math.round(coords.length * (pct / 100)));
+    const path = coords.slice(0, upto).map(c => [c[1], c[0]]);
+    if (routeTraveledLine) { routeTraveledLine.setLatLngs(path); return; }
+    routeTraveledLine = L.polyline(path, { color: "#EAF2EC", weight: 4, opacity: 0.9 }).addTo(map);
+}
+
 async function pollRoute() {
     try { const r = await fetch("/api/route/status"); if (!r.ok) { endRoute(); return; } const d = await r.json();
     $("progress-bar").style.width = d.progress_pct + "%"; $("route-pct").textContent = Math.round(d.progress_pct) + "%";
+    drawTravelled(d.progress_pct);
+    if (d.speed_kmh != null && $("status-speed-text")) {
+        $("status-speed-text").textContent = formatSpeed(d.speed_kmh) + (adaptiveSpeed ? " · adaptive" : "");
+    }
     if ($("status-route")) { $("status-route").classList.remove("hidden"); const rem = routeDistanceKm * (1 - d.progress_pct / 100); const eta = d.speed_kmh > 0 ? Math.round((rem / d.speed_kmh) * 60) : 0; $("status-route-text").textContent = formatRouteDistance(rem) + " | ETA " + eta + "m | " + Math.round(d.progress_pct) + "%"; }
     if (!d.active) {
         endRoute();
@@ -1719,7 +1734,16 @@ async function confirmAddSchedule() { const name = $("schedule-name").value.trim
 async function loadRouteHistory() {
     try { const r = await fetch("/api/routes"); const routes = await r.json(); const c = $("route-history-list"); c.textContent = "";
     if (!routes.length) { const e = document.createElement("div"); e.className = "empty-state"; e.textContent = "No saved routes"; c.appendChild(e); return; }
-    routes.forEach(rt => { const item = document.createElement("div"); item.className = "saved-item"; const n = document.createElement("span"); n.className = "saved-name"; n.textContent = rt.name; const co = document.createElement("span"); co.className = "saved-coords"; co.textContent = rt.distance_km != null ? formatRouteDistance(rt.distance_km) : "?"; const del = document.createElement("button"); del.className = "saved-del"; del.title = "Delete"; del.textContent = "\u00D7"; del.addEventListener("click", async e => { e.stopPropagation(); await fetch("/api/routes/" + encodeURIComponent(rt.id), { method: "DELETE" }); loadRouteHistory(); toast("Route deleted"); }); item.appendChild(n); item.appendChild(co); item.appendChild(del); item.addEventListener("click", e => { if (e.target.classList.contains("saved-del")) return; if (rt.waypoints) { clearRoutePoints(); rt.waypoints.forEach(wp => addRoutePoint(wp.lat, wp.lng)); if (rt.waypoints.length) map.flyTo([rt.waypoints[0].lat, rt.waypoints[0].lng], 14); toast('Loaded "' + rt.name + '"'); } }); c.appendChild(item); });
+    routes.forEach(rt => { const item = document.createElement("div"); item.className = "saved-item"; const n = document.createElement("span"); n.className = "saved-name"; n.textContent = rt.name; const co = document.createElement("span"); co.className = "saved-coords"; co.textContent = rt.distance_km != null ? formatRouteDistance(rt.distance_km) : "?"; const del = document.createElement("button"); del.className = "saved-del"; del.title = "Delete"; del.textContent = "\u00D7"; del.addEventListener("click", async e => { e.stopPropagation(); await fetch("/api/routes/" + encodeURIComponent(rt.id), { method: "DELETE" }); loadRouteHistory(); toast("Route deleted"); }); item.appendChild(n); item.appendChild(co); item.appendChild(del); item.addEventListener("click", e => { if (e.target.classList.contains("saved-del")) return; if (rt.waypoints && rt.waypoints.length >= 2) {
+            clearRoutePoints();
+            routeStops = rt.waypoints.slice(0, 10).map(wp => {
+                const label = wp.lat.toFixed(5) + ", " + wp.lng.toFixed(5);
+                return { text: label, place: { name: label, display_name: label, lat: wp.lat, lon: wp.lng } };
+            });
+            renderStops();
+            renderStopsOnMap(true);
+            toast('Loaded "' + rt.name + '"');
+        } }); c.appendChild(item); });
     } catch (e) {}
 }
 function suggestedRouteName() {
@@ -1753,7 +1777,7 @@ async function saveCurrentRoute() {
             return toast(detail.error || "Could not save the route", "error");
         }
         $("route-save-form").classList.add("hidden");
-        loadRouteHistory();
+        await loadRouteHistory();
         toast('Route "' + name + '" saved');
     } catch (e) { toast("Could not save the route", "error"); }
 }

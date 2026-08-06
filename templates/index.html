@@ -15,7 +15,7 @@
         <div class="ob-page" id="ob-page-1">
             <div class="ob-icon"><img src="/static/icon.png" alt="" /></div>
             <h1 class="ob-title">Ghostpin</h1>
-            <p class="ob-sub">Change your iPhone's GPS location in one click.<br>Works with all apps — Find My, Life360, Pokemon Go, and more.</p>
+            <p class="ob-sub">Change your iPhone's GPS location in one click.<br>The change is system-wide, so most apps follow it. Some — games and banking especially — run extra checks that GPS alone does not satisfy.</p>
             <button class="btn btn-blue ob-btn" data-ob-next="2">Set Up Your Device</button>
             <button class="btn btn-ghost ob-btn-skip" data-ob-skip="">Skip setup — I know what I'm doing</button>
         </div>
@@ -479,13 +479,13 @@
         </div>
         <div class="tips-body">
             <div class="tips-section">
-                <div class="tips-section-title tips-green">YOUR STEALTH FEATURES (active)</div>
-                <div class="tips-item"><span class="tips-check">&#10003;</span> GPS Jitter &mdash; Natural 1-5m drift while stationary</div>
-                <div class="tips-item"><span class="tips-check">&#10003;</span> Cooldown Timer &mdash; Prevents impossible-travel detection</div>
-                <div class="tips-item"><span class="tips-check">&#10003;</span> Speed Randomization &mdash; Natural speed variation on routes</div>
-                <div class="tips-item"><span class="tips-check">&#10003;</span> Real Road Routes &mdash; OSRM routing follows actual streets</div>
-                <div class="tips-item"><span class="tips-check">&#10003;</span> IP Mismatch Alert &mdash; Warns when a VPN is needed</div>
-                <div class="tips-item"><span class="tips-check">&#10003;</span> Timezone Alert &mdash; Warns when device clock doesn't match</div>
+                <div class="tips-section-title tips-green">WHAT GHOSTPIN ACTUALLY DOES</div>
+                <div class="tips-item"><span class="tips-check">&#10003;</span> Real road routes &mdash; movement follows actual streets at a set speed, rather than a straight line</div>
+                <div class="tips-item"><span class="tips-check">&#10003;</span> Adaptive speed &mdash; optional; follows posted limits and eases off at junctions</div>
+                <div class="tips-item"><span class="tips-check">&#10003;</span> Cooldown timer &mdash; <strong>warns</strong> you when a jump would look like impossible travel. It does not block the jump; that is your call</div>
+                <div class="tips-item"><span class="tips-check">&#10003;</span> Speed randomisation &mdash; optional, off by default; varies pace along a route</div>
+                <div class="tips-item"><span class="tips-check">&#10003;</span> IP mismatch alert &mdash; warns when your connection says one place and your GPS says another</div>
+                <div class="tips-item tips-hint">Ghostpin does not add GPS jitter. Reasserting a slightly different pin each second makes a stationary spoof visibly wobble in Maps, and on recent iOS it can read as two competing location sources &mdash; which is worse than sitting still.</div>
             </div>
             <div class="tips-section">
                 <div class="tips-section-title tips-amber">WHAT YOU SHOULD DO</div>

@@ -382,6 +382,21 @@ def api_stealth_check():
 
 # ── Location API ───────────────────────────────────────────────
 
+def _seed_cooldown_reference():
+    """Give the cooldown something to measure the first jump against.
+
+    Without this the opening teleport of a session — real location to wherever
+    the user picked, often the longest jump they will make — is treated as no
+    movement at all. The IP lookup is coarse, but it is the right order of
+    magnitude and far better than pretending the jump never happened.
+    """
+    if loc_svc is None or loc_svc._last_known_position or loc_svc.current_location:
+        return
+    home = _get_ip_location()
+    if home and home.get("lat") is not None and home.get("lon") is not None:
+        loc_svc._last_known_position = {"lat": home["lat"], "lon": home["lon"]}
+
+
 @app.route("/api/location/set", methods=["POST"])
 def api_set_location():
     err = _check_ready()
@@ -402,6 +417,7 @@ def api_set_location():
             loc_svc.stop_route()
         loc_svc.joystick_stop()
         loc_svc.stop_wander()
+        _seed_cooldown_reference()
         result = loc_svc.set_location(lat, lon)
         loc_svc.add_to_history(lat, lon)
         return jsonify(result)
@@ -1076,10 +1092,10 @@ def _roam_route(lat, lon, radius_m, target_km):
     """
     radius_m = max(120.0, min(float(radius_m), 50000.0))
     sectors = max(5, min(9, int(target_km / 2) + 4))
-    allowed = radius_m * 1.3
+    allowed = radius_m * 1.08
 
     best = None
-    for spread in (0.85, 0.6, 0.4):
+    for spread in (0.8, 0.62, 0.45, 0.32):
         tour = _roam_tour(lat, lon, radius_m, spread, sectors)
         if not tour:
             continue
