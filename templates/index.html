@@ -16,8 +16,8 @@
             <div class="ob-icon"><img src="/static/icon.png" alt="" /></div>
             <h1 class="ob-title">Ghostpin</h1>
             <p class="ob-sub">Change your iPhone's GPS location in one click.<br>Works with all apps — Find My, Life360, Pokemon Go, and more.</p>
-            <button class="btn btn-blue ob-btn" onclick="obNext(2)">Set Up Your Device</button>
-            <button class="btn btn-ghost ob-btn-skip" onclick="obSkip()">Skip setup — I know what I'm doing</button>
+            <button class="btn btn-blue ob-btn" data-ob-next="2">Set Up Your Device</button>
+            <button class="btn btn-ghost ob-btn-skip" data-ob-skip="">Skip setup — I know what I'm doing</button>
         </div>
         <div class="ob-page hidden" id="ob-page-2">
             <div class="ob-badge">Step 1 of 3</div>
@@ -34,8 +34,8 @@
                 <span>Don't see Developer Mode? Make sure your iPhone is running iOS 16 or later.</span>
             </div>
             <div class="ob-nav">
-                <button class="btn btn-ghost" onclick="obNext(1)">Back</button>
-                <button class="btn btn-blue" onclick="obNext(3)">Next</button>
+                <button class="btn btn-ghost" data-ob-next="1">Back</button>
+                <button class="btn btn-blue" data-ob-next="3">Next</button>
             </div>
         </div>
         <div class="ob-page hidden" id="ob-page-3">
@@ -53,8 +53,8 @@
                 <span>No dialog? Unplug and replug the cable, or go to Settings &rarr; General &rarr; Transfer or Reset &rarr; Reset Location & Privacy.</span>
             </div>
             <div class="ob-nav">
-                <button class="btn btn-ghost" onclick="obNext(2)">Back</button>
-                <button class="btn btn-blue" onclick="obNext(4)">Next</button>
+                <button class="btn btn-ghost" data-ob-next="2">Back</button>
+                <button class="btn btn-blue" data-ob-next="4">Next</button>
             </div>
         </div>
         <div class="ob-page hidden" id="ob-page-4">
@@ -87,7 +87,7 @@
                 <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 11.08V12a10 10 0 11-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>
                 <span>Newer iOS versions: Keep your phone plugged in while spoofing. Ghostpin maintains the simulated location while connected.</span>
             </div>
-            <button class="btn btn-blue ob-btn" onclick="obDone()">Start Using the App</button>
+            <button class="btn btn-blue ob-btn" data-ob-done="">Start Using the App</button>
             <label class="ob-check"><input type="checkbox" id="ob-dismiss" checked /> Don't show this again</label>
         </div>
         <div class="ob-dots">

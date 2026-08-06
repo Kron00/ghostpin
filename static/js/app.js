@@ -258,6 +258,11 @@ document.addEventListener("DOMContentLoaded", async () => {
         btn.addEventListener("mouseleave", joystickStop);
     });
     $("btn-joy-stop").addEventListener("click", joystickStop);
+    document.querySelectorAll("[data-ob-next]").forEach(el =>
+        el.addEventListener("click", () => obNext(parseInt(el.dataset.obNext, 10))));
+    document.querySelectorAll("[data-ob-skip]").forEach(el => el.addEventListener("click", obSkip));
+    document.querySelectorAll("[data-ob-done]").forEach(el => el.addEventListener("click", obDone));
+
     document.addEventListener("keydown", onKeyDown);
     document.addEventListener("keyup", onKeyUp);
 
@@ -1448,7 +1453,8 @@ function endRoute() { clearInterval(routePolling); routePolling = null; $("btn-r
 // ── Live tracking ───────────────────────────────────────────
 function startMovementTracking() { if (movementPolling) return; movementPolling = setInterval(pollPosition, 500); }
 function stopMovementTracking() { if (movementPolling) { clearInterval(movementPolling); movementPolling = null; } trailPoints = []; }
-async function pollPosition() { try { const r = await fetch("/api/location/current"); if (!r.ok) return; const loc = await r.json(); activeSpoofLocation = { lat: loc.lat, lon: loc.lon }; placeMarker(loc.lat, loc.lon); if (followMode) { map.stop(); map.panTo([loc.lat, loc.lon], { animate: true, duration: 0.3, noMoveStart: true }); } } catch (e) {} }
+async function pollPosition() {
+    if (!deviceReady()) return; try { const r = await fetch("/api/location/current"); if (!r.ok) return; const loc = await r.json(); activeSpoofLocation = { lat: loc.lat, lon: loc.lon }; placeMarker(loc.lat, loc.lon); if (followMode) { map.stop(); map.panTo([loc.lat, loc.lon], { animate: true, duration: 0.3, noMoveStart: true }); } } catch (e) {} }
 
 // ── GPX ─────────────────────────────────────────────────────
 // ── Joystick ────────────────────────────────────────────────
@@ -1457,6 +1463,10 @@ let _activeKeys = new Set();
 let joystickCommand = Promise.resolve();
 function onKeyDown(e) {
     if (e.target.tagName === "INPUT" || e.target.tagName === "TEXTAREA" || e.target.tagName === "SELECT") return;
+    // Onboarding covers everything, so acting on a shortcut here would change
+    // state the user cannot see.
+    const onboarding = $("onboarding");
+    if (onboarding && getComputedStyle(onboarding).display !== "none") return;
     if (e.key === "?" || (e.key === "/" && e.shiftKey)) { e.preventDefault(); toggleShortcuts(); return; }
     if (e.key.toLowerCase() === "t") { e.preventDefault(); toggleTeleport(); return; }
     if (e.key.toLowerCase() === "g") { e.preventDefault(); toggleTips(); return; }
@@ -1468,7 +1478,14 @@ function onKeyDown(e) {
 function onKeyUp(e) { const dir = _keyMap[e.key.toLowerCase()]; if (!dir) return; _activeKeys.delete(dir); if (_activeKeys.size === 0) joystickStop(); else { const combined = _combineDirections(); if (combined) joystickMove(combined); } }
 function _combineDirections() { const has = d => _activeKeys.has(d); if (has("n") && has("e")) return "ne"; if (has("n") && has("w")) return "nw"; if (has("s") && has("e")) return "se"; if (has("s") && has("w")) return "sw"; if (has("n")) return "n"; if (has("s")) return "s"; if (has("e")) return "e"; if (has("w")) return "w"; return null; }
 
+function deviceReady() {
+    const label = $("device-label");
+    return !!(label && !/connect|no device|scanning/i.test(label.textContent || ""));
+}
+
 function joystickMove(direction) {
+    // Silently doing nothing reads as a broken button.
+    if (!deviceReady()) return toast("No iPhone connected", "error");
     const speed = readSpeedKmh() || selectedSpeed;
     document.querySelectorAll(".joy-btn").forEach(b => b.classList.remove("active"));
     const btn = document.querySelector('.joy-btn[data-dir="' + direction + '"]');

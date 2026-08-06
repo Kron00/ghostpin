@@ -1909,9 +1909,14 @@ kbd {
     .brand-lockup span { display: none; }
     #status-bar { max-width: calc(100vw - 24px); overflow-x: auto; }
     #coord-hud { display: none; }
-    /* Panels are full width here, so the offset above would push these off
-       screen. Park them bottom-right over the map instead. */
-    #map-controls { right: 12px; bottom: 60px; }
+    /* Panels are full width and in normal flow here, so anything pinned to the
+       viewport sits on top of them. Let these flow as well. */
+    #map-controls {
+        position: static;
+        flex-direction: row;
+        justify-content: flex-end;
+        margin: 0 12px 16px;
+    }
 }
 
 /* ── Speed field, roam slider, and the builder help ──────────── */
