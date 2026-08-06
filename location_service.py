@@ -761,10 +761,15 @@ class LocationService:
             hold_points.setdefault(point_index, []).append(hold)
 
         target = self._route_speed_target / 3.6
-        segment_caps = [
-            min(target, self._adaptive_ceiling(origin))
-            for origin in segment_origins
-        ]
+        # Adaptive means "drive the road": the posted limit governs each tagged
+        # segment, and the slider is folded into the profile only as the fallback
+        # where no limit is posted. It must NOT also cap the tagged segments —
+        # min(slider, limit) made a low slider crawl a 45 road at the slider
+        # speed. Without adaptive, the slider is the flat speed everywhere.
+        if self._route_speeds:
+            segment_caps = [self._adaptive_ceiling(origin) for origin in segment_origins]
+        else:
+            segment_caps = [target for _ in segment_origins]
         curvature_caps = []
         ceilings = []
         for index, point in enumerate(points):

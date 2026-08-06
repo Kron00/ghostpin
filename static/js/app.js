@@ -1186,8 +1186,8 @@ function updateAdaptiveUI() {
     button.setAttribute("aria-pressed", adaptiveSpeed ? "true" : "false");
     $("adaptive-note").classList.toggle("hidden", !adaptiveSpeed);
     $("speed-input").title = adaptiveSpeed
-        ? "Your setting is the ceiling; adaptive caps it to posted limits"
-        : "Set the route speed ceiling";
+        ? "Adaptive drives posted limits; your speed is used only where none is posted"
+        : "The speed to drive the whole route";
     renderCalculatedRouteStatus();
 }
 
@@ -1617,10 +1617,13 @@ function renderCalculatedRouteStatus() {
     if (summary.distanceKm != null) googleParts.push(formatRouteDistance(summary.distanceKm));
     if (summary.routeName) googleParts.push(summary.routeName);
     let text = googleParts.join(" · ");
-    if (projection) {
-        text += (text ? ". " : "") + "At your " + formatSpeed(speedKmh) + " ceiling: "
-            + projection + " minimum, not a promised ETA.";
-        if (adaptiveSpeed) text += " Adaptive may go slower for posted limits and junction stops.";
+    if (adaptiveSpeed) {
+        // Adaptive drives the posted limits, so Google's own estimate is the
+        // closest guide; a flat-speed projection would be misleading.
+        text += (text ? ". " : "") + "Adaptive follows posted limits, so expect close to Google's time plus junction stops.";
+    } else if (projection) {
+        text += (text ? ". " : "") + "At your " + formatSpeed(speedKmh) + ": "
+            + projection + ", not a promised ETA.";
     }
     status.className = "route-address-status success";
     status.textContent = text;
@@ -1711,6 +1714,10 @@ function renderRouteSpeedStatus(data, targetOverride = null) {
         }
         if (data.holding === true) {
             statusSpeed.textContent = "Stopped";
+        } else if (routeAdaptive) {
+            // Adaptive follows the posted limit, so the slider is not the pace —
+            // show the live speed alone rather than a misleading "45 / 9".
+            statusSpeed.textContent = formatSpeed(currentSpeed) + " · adaptive";
         } else if (targetSpeed != null) {
             statusSpeed.textContent = displaySpeedFromKmh(currentSpeed) + " / "
                 + displaySpeedFromKmh(targetSpeed) + " " + unit;
