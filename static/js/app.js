@@ -93,6 +93,9 @@ function formatRouteDistance(distanceKm) {
 
 function queueLiveSpeedUpdate(speedKmh, immediate = false) {
     clearTimeout(speedUpdateTimer);
+    // Nothing to tell the phone if there is no phone. The speed is applied
+    // when a route starts anyway.
+    if (!deviceReady()) return;
     const send = async () => {
         try {
             const response = await fetch("/api/movement/speed", {
@@ -544,7 +547,13 @@ function placeMarker(lat, lng) {
 function toggleTiles() { darkTiles = !darkTiles; const t = darkTiles ? TILES.dark : TILES.light; map.removeLayer(tileLayer); tileLayer = L.tileLayer(t.url, { attribution: t.attr, maxZoom: 19, subdomains: "abcd" }).addTo(map); }
 
 // ── Teleport to ─────────────────────────────────────────────
+function coordsInRange(lat, lon) {
+    return Number.isFinite(lat) && Number.isFinite(lon)
+        && Math.abs(lat) <= 90 && Math.abs(lon) <= 180;
+}
+
 async function teleportTo(lat, lon) {
+    if (!coordsInRange(lat, lon)) return toast("Latitude must be within ±90 and longitude within ±180", "error");
     storePreviousLocation();
     try { const r = await fetch("/api/location/set", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ lat, lon }) }); if (r.ok) { activeSpoofLocation = { lat, lon }; toast("Teleported to " + lat.toFixed(4) + ", " + lon.toFixed(4)); addToRecent(lat, lon); _stealthDismissed = false; checkStealth(); } else { const d = await r.json(); toast(d.error || "Failed", "error"); } } catch (e) { toast("Connection error", "error"); }
 }
@@ -553,6 +562,9 @@ async function teleportTo(lat, lon) {
 async function setLocation() {
     const lat = parseFloat($("lat-input").value), lon = parseFloat($("lon-input").value);
     if (isNaN(lat) || isNaN(lon)) return toast("Place a marker on the map first", "error");
+    // Catch an impossible coordinate here rather than asking the phone to
+    // reject it after a round trip.
+    if (!coordsInRange(lat, lon)) return toast("Latitude must be within ±90 and longitude within ±180", "error");
     storePreviousLocation();
     try { const r = await fetch("/api/location/set", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ lat, lon }) }); const d = await r.json(); if (r.ok) { activeSpoofLocation = { lat, lon }; toast("Location set: " + lat.toFixed(4) + ", " + lon.toFixed(4)); placeMarker(lat, lon); addToRecent(lat, lon); _stealthDismissed = false; checkStealth(); } else toast(d.error || "Failed", "error"); } catch (e) { toast("Connection error", "error"); }
 }
@@ -764,18 +776,36 @@ async function pollDevice() {
 }
 
 async function autoConnect() {
+    // On load nobody pressed anything, so the controls stay live and only the
+    // status line reports the search. Disabling them made it look stuck.
+    const status = $("connect-status");
+    if (status) status.textContent = "Looking for your iPhone…";
     try {
-        if ($("connect-status")) $("connect-status").textContent = "Auto-connecting...";
-        await connectDevice(false);
-    } catch (e) {}
+        const r = await fetch("/api/device/connect", {
+            method: "POST", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ wifi: false }),
+        });
+        const d = await r.json().catch(() => ({}));
+        if (r.ok) {
+            toast("Connected via " + d.connection_type + " (" + (d.tunnel_mode || "local") + ")");
+            if (status) status.textContent = "";
+            pollDevice();
+        } else if (status) {
+            status.textContent = d.error || "No iPhone found. Plug one in and press Connect USB.";
+        }
+    } catch (e) {
+        if (status) status.textContent = "No iPhone found. Plug one in and press Connect USB.";
+    }
 }
 
 // ── Connection ──────────────────────────────────────────────
 async function connectDevice(wifi = false, udid = null) {
     const status = $("connect-status"), btnU = $("btn-connect"), btnW = $("btn-connect-wifi");
     const origU = btnU?.textContent, origW = btnW?.textContent;
-    if (btnU) { btnU.disabled = true; btnU.classList.add("btn-loading"); }
-    if (btnW) { btnW.disabled = true; btnW.classList.add("btn-loading"); }
+    // Only the control that was pressed shows the loading state; the other
+    // stays available so the alternative transport can still be tried.
+    const active = wifi ? btnW : btnU;
+    if (active) { active.disabled = true; active.classList.add("btn-loading"); }
     if (wifi && btnW) btnW.textContent = "Connecting...";
     else if (btnU) btnU.textContent = "Connecting...";
     if (status) status.textContent = wifi ? "Scanning for WiFi device..." : "Scanning for USB device...";
@@ -863,7 +893,7 @@ function updateRouteUI() {
     const placed = routeStops.filter(stop => stop.place && stop.place.lat != null);
     if (!calculatedRouteCoordinates && placed.length >= 2) {
         routePoints = placed.map(stop => ({ lat: stop.place.lat, lng: stop.place.lon }));
-        if (closeLoop && routePoints.length >= 3) routePoints.push({ ...routePoints[0] });
+        if (closeLoop && routePoints.length >= 2) routePoints.push({ ...routePoints[0] });
     }
     const ready = routePoints.length >= 2;
     $("btn-route-start").disabled = !ready;
@@ -1078,7 +1108,7 @@ function renderStopsOnMap(fit = false) {
 
     if (placed.length >= 2) {
         const line = placed.map(e => [e.stop.place.lat, e.stop.place.lon]);
-        if (closeLoop && placed.length >= 3) line.push(line[0]);
+        if (closeLoop && placed.length >= 2) line.push(line[0]);
         stopLine = L.polyline(line, {
             color: "#79C2B8", weight: 2, dashArray: "7 6", opacity: 0.65,
         }).addTo(map);
@@ -1435,6 +1465,11 @@ function setBuildMode(mode) {
     document.querySelectorAll(".build-pane").forEach(pane => {
         pane.classList.toggle("active", pane.id === "build-" + mode);
     });
+    if (mode === "roam") {
+        $("route-hint").textContent = "Pick a centre and a radius, then start roaming.";
+    } else {
+        updateRouteUI();
+    }
 }
 
 function drawCalculatedRoute(data, label) {
@@ -1461,7 +1496,7 @@ async function calculateAddressRoute() {
     const status = $("route-address-status");
     const stops = routeStops.map(stop => stop.text.trim()).filter(Boolean);
     if (stops.length < 2) return toast("Enter at least a start and a destination", "error");
-    if (closeLoop && stops.length >= 3) stops.push(stops[0]);
+    if (closeLoop && stops.length >= 2) stops.push(stops[0]);
     const button = $("btn-route-calculate");
     button.disabled = true; button.textContent = "Calculating…";
     status.classList.remove("hidden");
@@ -1558,7 +1593,9 @@ function onKeyDown(e) {
     if (e.key === "-") { map.zoomOut(); return; }
     const dir = _keyMap[e.key.toLowerCase()]; if (!dir) return; e.preventDefault(); _activeKeys.add(dir); const combined = _combineDirections(); if (combined) joystickMove(combined);
 }
-function onKeyUp(e) { const dir = _keyMap[e.key.toLowerCase()]; if (!dir) return; _activeKeys.delete(dir); if (_activeKeys.size === 0) joystickStop(); else { const combined = _combineDirections(); if (combined) joystickMove(combined); } }
+function onKeyUp(e) {
+    if (e.target.tagName === "INPUT" || e.target.tagName === "TEXTAREA" || e.target.tagName === "SELECT") return;
+    const dir = _keyMap[e.key.toLowerCase()]; if (!dir) return; _activeKeys.delete(dir); if (_activeKeys.size === 0) joystickStop(); else { const combined = _combineDirections(); if (combined) joystickMove(combined); } }
 function _combineDirections() { const has = d => _activeKeys.has(d); if (has("n") && has("e")) return "ne"; if (has("n") && has("w")) return "nw"; if (has("s") && has("e")) return "se"; if (has("s") && has("w")) return "sw"; if (has("n")) return "n"; if (has("s")) return "s"; if (has("e")) return "e"; if (has("w")) return "w"; return null; }
 
 function deviceReady() {
