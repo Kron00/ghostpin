@@ -1036,6 +1036,29 @@ _ROAM_HIGHWAYS = (
 )
 
 
+def _trim_backtracks(coordinates):
+    """Collapse out-and-back spurs: drive in, touch the waypoint, retrace out.
+
+    A scattered destination often lands inside a dead-end pocket, so the tour
+    grows a long tendril up a road and straight back down it. The retrace
+    reuses the same OSM nodes, so walking the path with a stack and cancelling
+    any step that returns to the point before last removes the whole spur while
+    leaving genuine loops (which never immediately retrace an edge) alone.
+    """
+    def same(a, b):
+        return abs(a[0] - b[0]) < 1e-6 and abs(a[1] - b[1]) < 1e-6
+
+    out = []
+    for point in coordinates:
+        if out and same(out[-1], point):
+            continue
+        if len(out) >= 2 and same(out[-2], point):
+            out.pop()
+        else:
+            out.append(point)
+    return out
+
+
 def _roam_tour(lat, lon, radius_m, spread, sectors, from_lat=None, from_lon=None):
     """One candidate tour: a destination per sector, joined by road."""
     offset = random.uniform(0, 2 * math.pi)
@@ -1075,6 +1098,7 @@ def _roam_tour(lat, lon, radius_m, spread, sectors, from_lat=None, from_lon=None
         previous = cleaned[-1]
         if abs(point[0] - previous[0]) > 1e-7 or abs(point[1] - previous[1]) > 1e-7:
             cleaned.append(point)
+    cleaned = _trim_backtracks(cleaned)
     if len(cleaned) < 3:
         return None
 
@@ -1088,6 +1112,13 @@ def _roam_tour(lat, lon, radius_m, spread, sectors, from_lat=None, from_lon=None
         dx = (plon - lon) * 111320.0 * cos_lat
         worst = max(worst, math.hypot(dx, dy))
 
+    # Trimming spurs shortened the path, so OSRM's own distance overstates it.
+    trimmed_m = 0.0
+    for (lon1, lat1), (lon2, lat2) in zip(cleaned, cleaned[1:]):
+        dy = (lat2 - lat1) * 111320.0
+        dx = (lon2 - lon1) * 111320.0 * cos_lat
+        trimmed_m += math.hypot(dx, dy)
+
     return {
         "provider": "roam",
         "coordinates": cleaned,
@@ -1095,7 +1126,7 @@ def _roam_tour(lat, lon, radius_m, spread, sectors, from_lat=None, from_lon=None
             {"lat": cleaned[0][1], "lng": cleaned[0][0]},
             {"lat": cleaned[-1][1], "lng": cleaned[-1][0]},
         ],
-        "distance_km": round(float(route.get("distance", 0)) / 1000, 2),
+        "distance_km": round(trimmed_m / 1000, 2),
         "max_from_centre_m": round(worst),
     }
 
@@ -1180,7 +1211,11 @@ _CLASS_DEFAULT_KMH = {
         "living_street": 15, "service": 15, "road": 30,
     }.items()
 }
-_JUNCTION_RADIUS_M = 45.0
+# A stop sign or signal that governs the driven road sits ON its OSM way, so it
+# lands within a few metres of the route line. A generous radius here matched
+# cross-street stop signs — the ones facing the side road, not the driver — and
+# made realistic mode halt at nearly every residential intersection.
+_JUNCTION_RADIUS_M = 10.0
 _HOLD_DEDUP_M = 25.0
 _MATCH_RADIUS_M = 35.0
 _ALLOWED_HOLD_KINDS = frozenset(("signal", "stop", "waypoint"))
