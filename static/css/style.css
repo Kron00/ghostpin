@@ -1566,7 +1566,7 @@ body.map-picking .leaflet-container { cursor: crosshair; }
 #toasts {
     position: fixed;
     top: calc(var(--topbar-h) + 12px);
-    right: 12px;
+    right: calc(var(--panel-w) + 24px);
     z-index: 2000;
     display: flex;
     flex-direction: column;
@@ -1907,7 +1907,14 @@ kbd {
 
     #stealth-banner { max-width: calc(100vw - 24px); }
     .brand-lockup span { display: none; }
-    #status-bar { max-width: calc(100vw - 24px); overflow-x: auto; }
+    #status-bar {
+        position: static;
+        transform: none;
+        margin: 0 12px 12px;
+        max-width: calc(100vw - 24px);
+        overflow-x: auto;
+    }
+    #toasts { right: 12px; left: 12px; align-items: center; }
     #coord-hud { display: none; }
     /* Panels are full width and in normal flow here, so anything pinned to the
        viewport sits on top of them. Let these flow as well. */

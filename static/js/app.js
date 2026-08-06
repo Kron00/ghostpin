@@ -269,7 +269,9 @@ document.addEventListener("DOMContentLoaded", async () => {
     // Speed
     $("speed-input").addEventListener("input", () => {
         const speedKmh = readSpeedKmh();
-        if (speedKmh == null || speedKmh > 300) return;
+        // Showing 999 while moving at 32 is worse than correcting the field.
+        if (speedKmh != null && speedKmh > 300) { setSpeedInputFromKmh(300); setSelectedSpeed(300); return; }
+        if (speedKmh == null) return;
         setSelectedSpeed(speedKmh, false);
         queueLiveSpeedUpdate(selectedSpeed);
     });
@@ -379,7 +381,14 @@ function esc(s) { const d = document.createElement("div"); d.textContent = s; re
 function escAttr(s) { return esc(s).replace(/"/g, "&quot;").replace(/'/g, "&#39;"); }
 
 // ── Panels ──────────────────────────────────────────────────
-function togglePanel(panelId) { const p = $(panelId); if (!p) return; p.classList.toggle("collapsed"); localStorage.setItem("panel_" + panelId, p.classList.contains("collapsed") ? "collapsed" : "open"); positionPlacesPanel(); }
+function togglePanel(panelId) {
+    const p = $(panelId); if (!p) return;
+    p.classList.toggle("collapsed");
+    const collapsed = p.classList.contains("collapsed");
+    const name = (p.querySelector(".hud-panel-header > span")?.textContent || "panel").toLowerCase();
+    p.querySelectorAll(".hud-panel-close").forEach(btn => {
+        btn.setAttribute("aria-label", (collapsed ? "Expand " : "Collapse ") + name + " panel");
+    }); localStorage.setItem("panel_" + panelId, p.classList.contains("collapsed") ? "collapsed" : "open"); positionPlacesPanel(); }
 
 // The left column is two stacked fixed panels, so their heights have to be
 // shared out by hand. Collapsing Places hands its space to Location rather
@@ -429,9 +438,27 @@ function toast(msg, type = "success") { const dur = type === "warning" ? 5000 : 
 function toggleTheme() { lightTheme = !lightTheme; document.body.classList.toggle("light", lightTheme); localStorage.setItem("theme", lightTheme ? "light" : "dark"); const t = lightTheme ? TILES.light : TILES.dark; darkTiles = !lightTheme; map.removeLayer(tileLayer); tileLayer = L.tileLayer(t.url, { attribution: t.attr, maxZoom: 19, subdomains: "abcd" }).addTo(map); }
 
 // ── Coord format ────────────────────────────────────────────
-function toggleCoordFormat() { coordFormat = coordFormat === "dd" ? "dms" : "dd"; localStorage.setItem("coord_fmt", coordFormat); $("btn-coord-fmt").textContent = coordFormat.toUpperCase(); if (marker) { const ll = marker.getLatLng(); updateCoordInputs(ll.lat, ll.lng); } }
+function toggleCoordFormat() {
+    coordFormat = coordFormat === "dd" ? "dms" : "dd";
+    localStorage.setItem("coord_fmt", coordFormat);
+    $("btn-coord-fmt").textContent = coordFormat.toUpperCase();
+    applyCoordInputType();
+    const source = marker ? { lat: marker.getLatLng().lat, lng: marker.getLatLng().lng } : lastCoords;
+    if (source) updateCoordInputs(source.lat, source.lng);
+}
 function toDMS(deg, isLon) { const dir = isLon ? (deg >= 0 ? "E" : "W") : (deg >= 0 ? "N" : "S"); deg = Math.abs(deg); const d = Math.floor(deg); const m = Math.floor((deg - d) * 60); const s = ((deg - d - m / 60) * 3600).toFixed(1); return d + "\u00B0" + m + "'" + s + '"' + dir; }
-function updateCoordInputs(lat, lng) { if (coordFormat === "dms") { $("lat-input").value = toDMS(lat, false); $("lon-input").value = toDMS(lng, true); } else { $("lat-input").value = lat.toFixed(6); $("lon-input").value = lng.toFixed(6); } if ($("coord-text")) { $("coord-text").textContent = lat.toFixed(6) + ", " + lng.toFixed(6); $("coord-text").classList.add("coord-glow"); } }
+let lastCoords = null;
+
+// A number input silently drops 48°51'29.7"N, so the field type has to follow
+// the coordinate format.
+function applyCoordInputType() {
+    const type = coordFormat === "dms" ? "text" : "number";
+    ["lat-input", "lon-input"].forEach(id => { if ($(id) && $(id).type !== type) $(id).type = type; });
+}
+
+function updateCoordInputs(lat, lng) {
+    lastCoords = { lat, lng };
+    applyCoordInputType(); if (coordFormat === "dms") { $("lat-input").value = toDMS(lat, false); $("lon-input").value = toDMS(lng, true); } else { $("lat-input").value = lat.toFixed(6); $("lon-input").value = lng.toFixed(6); } if ($("coord-text")) { $("coord-text").textContent = lat.toFixed(6) + ", " + lng.toFixed(6); $("coord-text").classList.add("coord-glow"); } }
 
 // ── Teleport ────────────────────────────────────────────────
 function toggleTeleport() { teleportMode = !teleportMode; $("btn-teleport").classList.toggle("active", teleportMode); toast(teleportMode ? "Teleport ON \u2014 click map to move instantly" : "Teleport OFF", teleportMode ? "success" : "error"); }
@@ -1216,6 +1243,8 @@ function openAssignMenu(anchor, place) {
     }
 
     routeStops.forEach((stop, index) => {
+        // The smart action above already covers this one.
+        if (target && !target.isNew && index === target.index) return;
         const item = document.createElement("button");
         item.type = "button";
         item.className = "assign-menu-item";
@@ -1571,7 +1600,8 @@ async function loadProfiles() {
     profiles.forEach(p => { const item = document.createElement("div"); item.className = "saved-item"; const n = document.createElement("span"); n.className = "saved-name"; n.textContent = p.name; const co = document.createElement("span"); co.className = "saved-coords"; co.textContent = (p.lat != null ? p.lat.toFixed(2) : "--") + ", " + (p.lon != null ? p.lon.toFixed(2) : "--"); const del = document.createElement("button"); del.className = "saved-del"; del.title = "Delete"; del.textContent = "\u00D7"; del.addEventListener("click", async e => { e.stopPropagation(); await fetch("/api/profiles/" + encodeURIComponent(p.name), { method: "DELETE" }); loadProfiles(); toast('Deleted "' + p.name + '"'); }); item.appendChild(n); item.appendChild(co); item.appendChild(del); item.addEventListener("click", async e => { if (e.target.classList.contains("saved-del")) return; try { const r2 = await fetch("/api/profiles/" + encodeURIComponent(p.name) + "/load", { method: "POST" }); const d = await r2.json(); if (r2.ok) { toast('Profile "' + p.name + '" loaded'); if (d.profile?.lat != null) { placeMarker(d.profile.lat, d.profile.lon); map.flyTo([d.profile.lat, d.profile.lon], 15); } } else toast(d.error || "Failed", "error"); } catch (e2) { toast("Error", "error"); } }); c.appendChild(item); });
     } catch (e) {}
 }
-function showProfileForm() { $("profile-form").classList.remove("hidden"); $("profile-name").value = ""; $("profile-name").focus(); }
+function showProfileForm() { $("profile-form").classList.remove("hidden");
+    $("profile-form").scrollIntoView({ block: "nearest", behavior: "smooth" }); $("profile-name").value = ""; $("profile-name").focus(); }
 async function confirmSaveProfile() { const name = $("profile-name").value.trim(); if (!name) return toast("Enter a name", "error"); const lat = parseFloat($("lat-input").value), lon = parseFloat($("lon-input").value); try { const r = await fetch("/api/profiles", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ name, lat: isNaN(lat) ? null : lat, lon: isNaN(lon) ? null : lon, speed: readSpeedKmh() || selectedSpeed, route_mode: $("route-mode").value }) }); if (r.ok) { loadProfiles(); toast('Profile "' + name + '" saved'); $("profile-form").classList.add("hidden"); } else { const d = await r.json(); toast(d.error || "Failed", "error"); } } catch (e) { toast("Error", "error"); } }
 
 // ── Schedules ───────────────────────────────────────────────
@@ -1617,7 +1647,10 @@ async function saveCurrentRoute() {
             body: JSON.stringify({ name, waypoints: routePoints, speed: selectedSpeed,
                                    mode: $("route-mode").value, distance_km: routeDistanceKm })
         });
-        if (!r.ok) return toast("Could not save the route", "error");
+        if (!r.ok) {
+            const detail = await r.json().catch(() => ({}));
+            return toast(detail.error || "Could not save the route", "error");
+        }
         $("route-save-form").classList.add("hidden");
         loadRouteHistory();
         toast('Route "' + name + '" saved');

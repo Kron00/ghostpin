@@ -177,9 +177,9 @@ def api_device_connect():
 
         try:
             if device_mgr.device_info.get("connected"):
-                info = device_mgr.reconnect(udid=udid, prefer_wifi=prefer_wifi, retries=10)
+                info = device_mgr.reconnect(udid=udid, prefer_wifi=prefer_wifi, retries=5)
             else:
-                info = device_mgr.connect(udid=udid, prefer_wifi=prefer_wifi, retries=10)
+                info = device_mgr.connect(udid=udid, prefer_wifi=prefer_wifi, retries=5)
 
             loc_svc = LocationService(device_mgr.simulator, device_mgr.bridge)
             _start_schedule_checker()
