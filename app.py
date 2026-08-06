@@ -289,7 +289,7 @@ def api_default_location():
     return jsonify({"available": False, "source": "unavailable"})
 
 
-# ── Stealth / Anti-detection API ──────────────────────────────
+# ── Location consistency API ──────────────────────────────────
 
 _ip_cache = {"data": None, "ts": 0}
 
@@ -332,18 +332,26 @@ def _get_ip_location():
 
 @app.route("/api/stealth/check")
 def api_stealth_check():
-    """Check for IP vs GPS mismatch and timezone warnings."""
-    result = {"ip_mismatch": False, "ip_location": None,
+    """Check approximate IP, simulated GPS, and timezone consistency."""
+    result = {"check_available": False, "unavailable_reason": None,
+              "ip_mismatch": False, "ip_location": None,
               "spoof_location": None, "distance_km": None, "warnings": []}
 
-    if loc_svc is None or loc_svc.get_current() is None:
+    if loc_svc is None:
+        result["unavailable_reason"] = "no_location"
         return jsonify(result)
 
     spoof = loc_svc.get_current()
-    ip_loc = _get_ip_location()
-    if ip_loc is None:
+    if spoof is None:
+        result["unavailable_reason"] = "no_location"
         return jsonify(result)
 
+    ip_loc = _get_ip_location()
+    if ip_loc is None:
+        result["unavailable_reason"] = "ip_lookup"
+        return jsonify(result)
+
+    result["check_available"] = True
     result["ip_location"] = ip_loc
     result["spoof_location"] = spoof
 
@@ -976,6 +984,7 @@ def _google_multi_stop_route(stops):
 
     coordinates = []
     waypoints = []
+    stop_indices = []
     total_km = 0.0
     total_min = 0.0
 
@@ -985,6 +994,8 @@ def _google_multi_stop_route(stops):
         if coordinates and leg_coords and coordinates[-1] == leg_coords[0]:
             leg_coords = leg_coords[1:]
         coordinates.extend(leg_coords)
+        if index < len(legs) - 1:
+            stop_indices.append(len(coordinates) - 1)
         total_km += leg["distance_km"]
         total_min += leg["duration_min"]
         if index == 0:
@@ -1005,6 +1016,7 @@ def _google_multi_stop_route(stops):
         "stops": [leg["origin"] for leg in legs] + [last["destination"]],
         "waypoints": waypoints,
         "coordinates": coordinates,
+        "stop_indices": stop_indices,
         "distance_km": round(total_km, 2),
         "duration_min": round(total_min, 1),
         "legs": len(legs),
@@ -1024,17 +1036,21 @@ _ROAM_HIGHWAYS = (
 )
 
 
-def _roam_tour(lat, lon, radius_m, spread, sectors):
+def _roam_tour(lat, lon, radius_m, spread, sectors, from_lat=None, from_lon=None):
     """One candidate tour: a destination per sector, joined by road."""
     offset = random.uniform(0, 2 * math.pi)
-    points = []
+    scattered = []
     for index in range(sectors):
         angle = offset + (2 * math.pi * index / sectors) + random.uniform(-0.3, 0.3)
         distance = radius_m * spread * random.uniform(0.5, 1.0)
         d_lat = (distance * math.cos(angle)) / 111320.0
         d_lon = (distance * math.sin(angle)) / (111320.0 * math.cos(math.radians(lat)))
-        points.append((lat + d_lat, lon + d_lon))
-    points.append(points[0])
+        scattered.append((lat + d_lat, lon + d_lon))
+
+    points = list(scattered)
+    if from_lat is not None and from_lon is not None:
+        points.insert(0, (from_lat, from_lon))
+    points.append(scattered[0])
 
     coords = ";".join(f"{plon:.6f},{plat:.6f}" for plat, plon in points)
     url = (f"https://router.project-osrm.org/route/v1/driving/{coords}"
@@ -1064,7 +1080,10 @@ def _roam_tour(lat, lon, radius_m, spread, sectors):
 
     cos_lat = math.cos(math.radians(lat))
     worst = 0.0
-    for plon, plat in cleaned:
+    # The caller vouches for its current position; only the new tour must fit
+    # the area drawn on the map.
+    checked = cleaned[1:] if from_lat is not None and from_lon is not None else cleaned
+    for plon, plat in checked:
         dy = (plat - lat) * 111320.0
         dx = (plon - lon) * 111320.0 * cos_lat
         worst = max(worst, math.hypot(dx, dy))
@@ -1081,7 +1100,7 @@ def _roam_tour(lat, lon, radius_m, spread, sectors):
     }
 
 
-def _roam_route(lat, lon, radius_m, target_km):
+def _roam_route(lat, lon, radius_m, target_km, from_lat=None, from_lon=None):
     """A road route touring the whole area, or None if it cannot be built.
 
     A random walk from the centre hugs whichever road it starts on, so this
@@ -1096,7 +1115,7 @@ def _roam_route(lat, lon, radius_m, target_km):
 
     best = None
     for spread in (0.8, 0.62, 0.45, 0.32):
-        tour = _roam_tour(lat, lon, radius_m, spread, sectors)
+        tour = _roam_tour(lat, lon, radius_m, spread, sectors, from_lat, from_lon)
         if not tour:
             continue
         if tour["max_from_centre_m"] <= allowed:
@@ -1119,10 +1138,22 @@ def api_roam_route():
     if not (-90 <= lat <= 90 and -180 <= lon <= 180):
         return jsonify({"error": "Centre is out of range"}), 400
 
+    from_lat = from_lon = None
+    if "from_lat" in data or "from_lon" in data:
+        try:
+            from_lat = float(data["from_lat"])
+            from_lon = float(data["from_lon"])
+        except (KeyError, TypeError, ValueError):
+            return jsonify({"error": "Both current-position coordinates are required"}), 400
+        if not (-90 <= from_lat <= 90 and -180 <= from_lon <= 180):
+            return jsonify({"error": "Current position is out of range"}), 400
+
     if not _search_allowed():
         return jsonify({"error": "Too many requests, slow down"}), 429
 
-    route = _roam_route(lat, lon, radius, max(1.0, min(target_km, 60.0)))
+    route = _roam_route(
+        lat, lon, radius, max(1.0, min(target_km, 60.0)), from_lat, from_lon
+    )
     if not route:
         return jsonify({"error": "No roads found in that area. Try a larger radius."}), 404
     return jsonify(route)
@@ -1133,13 +1164,15 @@ def api_roam_route():
 # key and is restricted to Asset Tracking customers, so they are not available
 # to us. OpenStreetMap tags the same information as `maxspeed`, free and
 # keyless, along with stop signs and traffic signals — which is what makes it
-# possible to slow down for a junction rather than only for a slower road.
+# possible to stop at a junction rather than only slow down for a slower road.
 
 _MPH_TO_KMH = 1.609344
 _ADAPTIVE_DEFAULT_KMH = 48.0        # ~30 mph where nothing is tagged
-_JUNCTION_SLOW_KMH = 12.0           # crawling up to a stop sign or signal
 _JUNCTION_RADIUS_M = 45.0
+_HOLD_DEDUP_M = 25.0
 _MATCH_RADIUS_M = 35.0
+_ALLOWED_HOLD_KINDS = frozenset(("signal", "stop", "waypoint"))
+_MAX_ROUTE_HOLDS = 1000
 
 
 def _parse_maxspeed(value):
@@ -1157,32 +1190,39 @@ def _parse_maxspeed(value):
 
 
 def _fetch_speed_profile(coordinates, fallback_kmh):
-    """A target speed for every segment of the route, or None if unavailable.
+    """Return segment speeds and junction holds, or None if both are unavailable.
 
     One Overpass query for the route's bounding box, then nearest-match each
-    coordinate. Returns None rather than raising: adaptive speed is a nicety
-    and must never stop a route from running.
+    coordinate. The speed list may be None while holds are still known. Errors
+    return None rather than stopping a route from running.
     """
-    if not coordinates or len(coordinates) < 2:
-        return None
-
-    lats = [point[1] for point in coordinates]
-    lons = [point[0] for point in coordinates]
-    south, north, west, east = min(lats), max(lats), min(lons), max(lons)
-    # A continent-sized bbox would return an unusable amount of data.
-    if (north - south) > 1.2 or (east - west) > 1.2:
-        return None
-
-    pad = 0.003
-    bbox = f"{south - pad},{west - pad},{north + pad},{east + pad}"
-    query = (
-        "[out:json][timeout:25];("
-        f'way[highway][maxspeed]({bbox});'
-        f'node[highway~"^(stop|give_way|traffic_signals)$"]({bbox});'
-        ");out geom;"
-    )
-
     try:
+        if not isinstance(coordinates, list) or len(coordinates) < 2:
+            return None
+        route_points = []
+        for point in coordinates:
+            if not isinstance(point, (list, tuple)) or len(point) < 2:
+                return None
+            lon, lat = float(point[0]), float(point[1])
+            if not (math.isfinite(lat) and math.isfinite(lon)):
+                return None
+            route_points.append((lon, lat))
+
+        lats = [point[1] for point in route_points]
+        lons = [point[0] for point in route_points]
+        south, north, west, east = min(lats), max(lats), min(lons), max(lons)
+        # A continent-sized bbox would return an unusable amount of data.
+        if (north - south) > 1.2 or (east - west) > 1.2:
+            return None
+
+        pad = 0.003
+        bbox = f"{south - pad},{west - pad},{north + pad},{east + pad}"
+        query = (
+            "[out:json][timeout:25];("
+            f'way[highway][maxspeed]({bbox});'
+            f'node[highway~"^(stop|give_way|traffic_signals)$"]({bbox});'
+            ");out geom;"
+        )
         response = http_requests.post(
             "https://overpass-api.de/api/interpreter",
             data={"data": query},
@@ -1191,83 +1231,194 @@ def _fetch_speed_profile(coordinates, fallback_kmh):
         )
         response.raise_for_status()
         elements = response.json().get("elements", [])
-    except (http_requests.RequestException, ValueError):
-        return None
+        if not isinstance(elements, list):
+            return None
 
-    # Bucket everything into a coarse grid so matching stays linear.
-    cell = 0.004
-    ways = {}
-    junctions = set()
+        # Bucket everything into a coarse grid so matching stays linear.
+        cell = 0.004
+        ways = {}
+        route_grid = {}
+        junctions = []
+        seen_junctions = set()
 
-    def key(lat, lon):
-        return (int(lat / cell), int(lon / cell))
+        def key(lat, lon):
+            return (int(lat / cell), int(lon / cell))
 
-    for element in elements:
-        if element.get("type") == "way":
-            speed = _parse_maxspeed(element.get("tags", {}).get("maxspeed"))
-            if not speed:
+        for index, (lon, lat) in enumerate(route_points):
+            route_grid.setdefault(key(lat, lon), []).append((index, lat, lon))
+
+        for element in elements:
+            if not isinstance(element, dict):
                 continue
-            for point in element.get("geometry", []) or []:
-                ways.setdefault(key(point["lat"], point["lon"]), []).append(
-                    (point["lat"], point["lon"], speed)
-                )
-        elif element.get("type") == "node":
-            junctions.add(key(element["lat"], element["lon"]))
-            # Keep the exact position for distance checks.
-            ways.setdefault(("j",) + key(element["lat"], element["lon"]), []).append(
-                (element["lat"], element["lon"], 0.0)
-            )
+            if element.get("type") == "way":
+                speed = _parse_maxspeed((element.get("tags") or {}).get("maxspeed"))
+                if not speed:
+                    continue
+                for point in element.get("geometry", []) or []:
+                    way_lat, way_lon = float(point["lat"]), float(point["lon"])
+                    ways.setdefault(key(way_lat, way_lon), []).append(
+                        (way_lat, way_lon, speed)
+                    )
+            elif element.get("type") == "node":
+                highway = (element.get("tags") or {}).get("highway")
+                if highway not in ("stop", "give_way", "traffic_signals"):
+                    continue
+                node_lat = float(element["lat"])
+                node_lon = float(element["lon"])
+                identity = element.get("id")
+                if identity is None:
+                    identity = (round(node_lat, 7), round(node_lon, 7), highway)
+                if identity in seen_junctions:
+                    continue
+                seen_junctions.add(identity)
+                kind = "signal" if highway == "traffic_signals" else "stop"
+                junctions.append((node_lat, node_lon, kind))
 
-    if not ways:
+        def neighbours(grid, lat, lon):
+            base = key(lat, lon)
+            for dy in (-1, 0, 1):
+                for dx in (-1, 0, 1):
+                    for entry in grid.get((base[0] + dy, base[1] + dx), []):
+                        yield entry
+
+        def metres(lat1, lon1, lat2, lon2):
+            dlat = (lat2 - lat1) * 111320.0
+            dlon = (lon2 - lon1) * 111320.0 * math.cos(math.radians(lat1))
+            return math.hypot(dlat, dlon)
+
+        hold_candidates = []
+        for node_lat, node_lon, kind in junctions:
+            best_index, best_distance = None, _JUNCTION_RADIUS_M
+            for index, route_lat, route_lon in neighbours(route_grid, node_lat, node_lon):
+                distance = metres(node_lat, node_lon, route_lat, route_lon)
+                if distance < best_distance:
+                    best_index, best_distance = index, distance
+            if best_index is not None:
+                hold_candidates.append([best_index, kind])
+
+        cumulative = [0.0]
+        for (lon1, lat1), (lon2, lat2) in zip(route_points, route_points[1:]):
+            cumulative.append(cumulative[-1] + metres(lat1, lon1, lat2, lon2))
+
+        holds = []
+        for index, kind in sorted(hold_candidates, key=lambda hold: hold[0]):
+            if holds and cumulative[index] - cumulative[holds[-1][0]] < _HOLD_DEDUP_M:
+                # A signal is the more specific description when OSM carries
+                # several controls for one physical junction.
+                if kind == "signal" and holds[-1][1] != "signal":
+                    holds[-1] = [index, kind]
+                continue
+            holds.append([index, kind])
+
+        speeds = None
+        if ways:
+            base_speed = (fallback_kmh if fallback_kmh and fallback_kmh > 0
+                          else _ADAPTIVE_DEFAULT_KMH)
+            matched_speeds = []
+            tagged = 0
+
+            for lon, lat in route_points[:-1]:
+                best_speed, best_distance = None, _MATCH_RADIUS_M
+                for way_lat, way_lon, speed in neighbours(ways, lat, lon):
+                    distance = metres(lat, lon, way_lat, way_lon)
+                    if distance < best_distance:
+                        best_distance, best_speed = distance, speed
+                if best_speed:
+                    tagged += 1
+                matched_speeds.append(round(best_speed or base_speed, 2))
+
+            # Sparse tags are not enough to claim adaptive speed, but known
+            # junctions remain useful independently of road-limit coverage.
+            if tagged >= max(3, len(matched_speeds) * 0.1):
+                # The motion engine already plans acceleration between segments;
+                # averaging here could raise a low posted ceiling above its limit.
+                speeds = matched_speeds
+
+        if speeds is None and not holds:
+            return None
+        return speeds, holds
+    except Exception:
         return None
 
-    def neighbours(lat, lon, prefix=()):
-        base = key(lat, lon)
-        for dy in (-1, 0, 1):
-            for dx in (-1, 0, 1):
-                for entry in ways.get(prefix + (base[0] + dy, base[1] + dx), []):
-                    yield entry
 
-    def metres(lat1, lon1, lat2, lon2):
-        dlat = (lat2 - lat1) * 111320.0
-        dlon = (lon2 - lon1) * 111320.0 * math.cos(math.radians(lat1))
-        return math.hypot(dlat, dlon)
+def _validate_route_holds(value, coordinates):
+    if value is None:
+        return []
+    if not isinstance(value, list):
+        raise ValueError("Holds must be a list of [coordinate index, kind]")
+    if len(value) > _MAX_ROUTE_HOLDS:
+        raise ValueError(f"A route can have at most {_MAX_ROUTE_HOLDS} holds")
+    if value and not isinstance(coordinates, list):
+        raise ValueError("Holds require calculated route coordinates")
 
-    base_speed = fallback_kmh if fallback_kmh and fallback_kmh > 0 else _ADAPTIVE_DEFAULT_KMH
-    speeds = []
-    tagged = 0
+    holds = []
+    for hold in value:
+        if not isinstance(hold, list) or len(hold) != 2:
+            raise ValueError("Each hold must be [coordinate index, kind]")
+        index, kind = hold
+        if isinstance(index, bool) or not isinstance(index, int):
+            raise ValueError("Each hold coordinate index must be an integer")
+        if not isinstance(kind, str) or kind not in _ALLOWED_HOLD_KINDS:
+            raise ValueError("Hold kind must be signal, stop, or waypoint")
+        if not 0 <= index < len(coordinates):
+            raise ValueError("Hold coordinate index is outside the route")
+        holds.append([index, kind])
+    return holds
 
-    for index in range(len(coordinates) - 1):
-        lon, lat = coordinates[index][0], coordinates[index][1]
 
-        best_speed, best_distance = None, _MATCH_RADIUS_M
-        for way_lat, way_lon, speed in neighbours(lat, lon):
-            distance = metres(lat, lon, way_lat, way_lon)
-            if distance < best_distance:
-                best_distance, best_speed = distance, speed
-        if best_speed:
-            tagged += 1
-        target = best_speed or base_speed
+def _waypoint_holds(stop_indices, coordinates):
+    if stop_indices is None:
+        return []
+    if not isinstance(stop_indices, list):
+        raise ValueError("Stop indices must be a list of coordinate indices")
+    if len(stop_indices) > _MAX_ROUTE_HOLDS:
+        raise ValueError(f"A route can have at most {_MAX_ROUTE_HOLDS} holds")
+    if stop_indices and not isinstance(coordinates, list):
+        raise ValueError("Stop indices require calculated route coordinates")
 
-        # Ease off approaching a stop sign, give way, or signal.
-        for node_lat, node_lon, _ in neighbours(lat, lon, ("j",)):
-            if metres(lat, lon, node_lat, node_lon) < _JUNCTION_RADIUS_M:
-                target = min(target, _JUNCTION_SLOW_KMH)
-                break
+    holds = []
+    for index in stop_indices:
+        if isinstance(index, bool) or not isinstance(index, int):
+            raise ValueError("Each stop index must be an integer")
+        if not 0 <= index < len(coordinates):
+            raise ValueError("Stop index is outside the route")
+        holds.append([index, "waypoint"])
+    return holds
 
-        speeds.append(round(target, 2))
 
-    # If almost nothing was tagged this is guesswork dressed up as data.
-    if tagged < max(3, len(speeds) * 0.1):
-        return None
+def _merge_route_holds(coordinates, *groups):
+    """Merge ordered hold sources, preserving the earlier source on overlap."""
+    candidates = []
+    sequence = 0
+    for priority, group in enumerate(groups):
+        for index, kind in group:
+            candidates.append([index, kind, priority, sequence])
+            sequence += 1
+    if not candidates:
+        return []
 
-    # Smooth so the phone does not teleport between speeds at every node.
-    smoothed = []
-    for index, value in enumerate(speeds):
-        window = speeds[max(0, index - 2):index + 3]
-        smoothed.append(round(min(value, sum(window) / len(window)) if value <= _JUNCTION_SLOW_KMH
-                              else round(sum(window) / len(window), 2), 2))
-    return smoothed
+    cumulative = [0.0]
+    for first, second in zip(coordinates, coordinates[1:]):
+        lon1, lat1 = float(first[0]), float(first[1])
+        lon2, lat2 = float(second[0]), float(second[1])
+        cumulative.append(
+            cumulative[-1] + _haversine_km(lat1, lon1, lat2, lon2) * 1000
+        )
+
+    merged = []
+    for candidate in sorted(candidates, key=lambda item: (item[0], item[3])):
+        if merged and cumulative[candidate[0]] - cumulative[merged[-1][0]] < _HOLD_DEDUP_M:
+            if candidate[2] < merged[-1][2]:
+                merged[-1] = candidate
+            continue
+        merged.append(candidate)
+
+    # Explicit and waypoint holds outrank adaptive controls if a very long
+    # urban route would otherwise exceed the runner's defensive bound.
+    if len(merged) > _MAX_ROUTE_HOLDS:
+        merged = sorted(merged, key=lambda item: (item[2], item[0]))[:_MAX_ROUTE_HOLDS]
+        merged.sort(key=lambda item: item[0])
+    return [[index, kind] for index, kind, _, _ in merged]
 
 
 @app.route("/api/route/calculate", methods=["POST"])
@@ -1316,13 +1467,31 @@ def api_route_start():
         speed = float(speed)
     except (TypeError, ValueError):
         speed = 5
-    speeds = None
-    adaptive_used = False
-    if data.get("adaptive") and coordinates:
-        speeds = _fetch_speed_profile(coordinates, speed)
-        adaptive_used = speeds is not None
 
     try:
+        client_holds = _validate_route_holds(data.get("holds"), coordinates)
+        waypoint_holds = _waypoint_holds(data.get("stop_indices"), coordinates)
+        if len(client_holds) + len(waypoint_holds) > _MAX_ROUTE_HOLDS:
+            raise ValueError(f"A route can have at most {_MAX_ROUTE_HOLDS} holds")
+        gps_noise = data.get("gps_noise", True)
+        if not isinstance(gps_noise, bool):
+            raise ValueError("GPS noise must be true or false")
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+
+    speeds = None
+    adaptive_holds = []
+    adaptive_used = False
+    if data.get("adaptive") and coordinates:
+        profile = _fetch_speed_profile(coordinates, speed)
+        if profile is not None:
+            speeds, adaptive_holds = profile
+            adaptive_used = speeds is not None
+
+    try:
+        holds = _merge_route_holds(
+            coordinates, waypoint_holds, client_holds, adaptive_holds
+        )
         result = loc_svc.start_route(
             waypoints,
             speed_kmh=speed,
@@ -1331,6 +1500,8 @@ def api_route_start():
             coordinates=coordinates,
             provider=data.get("provider") or "osrm",
             speeds=speeds,
+            holds=holds,
+            gps_noise=gps_noise,
         )
         result["adaptive"] = adaptive_used
         return jsonify(result)

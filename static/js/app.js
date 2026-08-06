@@ -7,6 +7,7 @@ let map, marker, userLocationMarker, routeLine, routeDisplayLine;
 let routePoints = [];
 let routeMarkers = [];
 let routePolling = null;
+let lastRouteStatus = null;
 let searchTimeout = null;
 let selectedSpeed = 15;
 let darkTiles = true;
@@ -25,6 +26,8 @@ let routeTraveledLine = null;
 let trailPoints = [];
 let calculatedRouteCoordinates = null;
 let calculatedRouteProvider = null;
+let calculatedRouteSummary = null;
+let calculatedRouteHolds = null;
 let activeSpoofLocation = null;
 // Unit is remembered once chosen; before that it follows the country the IP
 // lookup reports, so someone in the US is not handed km/h to correct.
@@ -91,6 +94,24 @@ function formatRouteDistance(distanceKm) {
     return speedUnitOrDefault() === "mph" ? (distanceKm * 0.621371).toFixed(1) + " mi" : distanceKm.toFixed(1) + " km";
 }
 
+function finiteNumber(value) {
+    if (value == null || value === "") return null;
+    const number = Number(value);
+    return Number.isFinite(number) ? number : null;
+}
+
+function formatEtaSeconds(value) {
+    const parsed = finiteNumber(value);
+    if (parsed == null || parsed < 0) return null;
+    const seconds = Math.round(parsed);
+    if (seconds < 60) return seconds + "s";
+    if (seconds < 3600) return Math.max(1, Math.round(seconds / 60)) + "m";
+    let hours = Math.floor(seconds / 3600);
+    let minutes = Math.round((seconds % 3600) / 60);
+    if (minutes === 60) { hours += 1; minutes = 0; }
+    return hours + "h " + minutes + "m";
+}
+
 function queueLiveSpeedUpdate(speedKmh, immediate = false) {
     clearTimeout(speedUpdateTimer);
     // Nothing to tell the phone if there is no phone. The speed is applied
@@ -116,7 +137,7 @@ function queueLiveSpeedUpdate(speedKmh, immediate = false) {
 
 function toggleSpeedUnit() {
     const speedKmh = selectedSpeed;
-    speedUnit = speedUnit === "kmh" ? "mph" : "kmh";
+    speedUnit = speedUnitOrDefault() === "kmh" ? "mph" : "kmh";
     localStorage.setItem("speed_unit", speedUnit);
     setSelectedSpeed(speedKmh);
     const toggle = $("speed-unit-toggle");
@@ -155,6 +176,13 @@ const SEARCH_ICON_SVG = '<svg width="14" height="14" viewBox="0 0 24 24" fill="n
 // ── Init ─────────────────────────────────────────────────────
 document.addEventListener("DOMContentLoaded", async () => {
     if (lightTheme) document.body.classList.add("light");
+    // This check only compares location signals, so its controls should not
+    // imply that iOS cannot identify a software-simulated position.
+    $("btn-stealth").title = "Location consistency guide";
+    $("btn-stealth").setAttribute("aria-label", "Open location consistency guide");
+    $("status-stealth-text").textContent = "CHECK NOT RUN";
+    $("status-stealth-dot").className = "status-dot";
+    $("status-stealth").title = "Compares the simulated location, IP-based location, and approximate timezone";
     if (!localStorage.getItem("ob_done")) {
         $("onboarding").classList.remove("hidden");
     } else {
@@ -341,7 +369,6 @@ document.addEventListener("DOMContentLoaded", async () => {
     $("btn-shortcuts-close").addEventListener("click", toggleShortcuts);
     $("shortcuts-overlay").addEventListener("click", e => { if (e.target === $("shortcuts-overlay")) toggleShortcuts(); });
 
-    // Stealth / Anti-detection
     $("btn-stealth").addEventListener("click", toggleTips);
     $("btn-tips-close").addEventListener("click", toggleTips);
     $("tips-overlay").addEventListener("click", e => { if (e.target === $("tips-overlay")) toggleTips(); });
@@ -374,7 +401,7 @@ document.addEventListener("DOMContentLoaded", async () => {
     map.on("mouseout", () => { $("coord-hud")?.classList.add("hidden"); });
 
     // Load data
-    pollDevice(); loadSaved(); loadProfiles(); loadSchedules(); loadRouteHistory(); loadRecent(); renderPopular(); updateStatusBar();
+    pollDevice(); loadSaved(); loadProfiles(); loadSchedules(); loadRouteHistory(); loadRecent(); renderPopular(); updateStatusBar(); checkStealth();
     setInterval(pollDevice, 5000);
     setInterval(pollCooldown, 2000);
     // Reflect scheduled or externally-triggered location changes in the UI.
@@ -862,11 +889,11 @@ function showSaveForm() {
 async function confirmSaveLocation() { const name = $("save-name").value.trim(); if (!name) return toast("Enter a name", "error"); const lat = parseFloat($("lat-input").value), lon = parseFloat($("lon-input").value); const cat = document.querySelector(".cat-pill.active")?.dataset.cat || "default"; try { const r = await fetch("/api/saved", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ name, lat, lon, category: cat }) }); if (r.ok) { loadSaved(); toast('Saved "' + name + '"'); $("save-form").classList.add("hidden"); } else { const d = await r.json(); toast(d.error || "Failed", "error"); } } catch (e) { toast("Connection error", "error"); } }
 
 // ── Route / Movement ────────────────────────────────────────
-function addRoutePoint(lat, lng, preserveCalculated = false) { if (!preserveCalculated) { calculatedRouteCoordinates = null; calculatedRouteProvider = null; } routePoints.push({ lat, lng }); const m = L.circleMarker([lat, lng], { radius: 6, color: "#6F999A", fillColor: "#6F999A", fillOpacity: 1, weight: 0 }).addTo(map); m.bindTooltip(String(routePoints.length), { permanent: true, direction: "center", className: "route-label" }); routeMarkers.push(m); if (routePoints.length >= 2) { if (routeLine) map.removeLayer(routeLine); routeLine = L.polyline(routePoints.map(p => [p.lat, p.lng]), { color: "#6F999A", weight: 2, dashArray: "8 6", opacity: 0.6 }).addTo(map); } updateRouteUI(); }
+function addRoutePoint(lat, lng, preserveCalculated = false) { if (!preserveCalculated) { calculatedRouteCoordinates = null; calculatedRouteProvider = null; calculatedRouteSummary = null; calculatedRouteHolds = null; } routePoints.push({ lat, lng }); const m = L.circleMarker([lat, lng], { radius: 6, color: "#6F999A", fillColor: "#6F999A", fillOpacity: 1, weight: 0 }).addTo(map); m.bindTooltip(String(routePoints.length), { permanent: true, direction: "center", className: "route-label" }); routeMarkers.push(m); if (routePoints.length >= 2) { if (routeLine) map.removeLayer(routeLine); routeLine = L.polyline(routePoints.map(p => [p.lat, p.lng]), { color: "#6F999A", weight: 2, dashArray: "8 6", opacity: 0.6 }).addTo(map); } updateRouteUI(); }
 // Drawing a calculated route replaces the geometry but must not throw away
 // the itinerary that produced it.
 function clearRouteGeometry() {
-    routePoints = []; calculatedRouteCoordinates = null; calculatedRouteProvider = null;
+    routePoints = []; calculatedRouteCoordinates = null; calculatedRouteProvider = null; calculatedRouteSummary = null; calculatedRouteHolds = null;
     routeMarkers.forEach(m => map.removeLayer(m)); routeMarkers = [];
     if (routeLine) { map.removeLayer(routeLine); routeLine = null; }
     if (routeDisplayLine) { map.removeLayer(routeDisplayLine); routeDisplayLine = null; }
@@ -1125,6 +1152,8 @@ function invalidateCalculatedRoute() {
     if (!calculatedRouteCoordinates) return;
     calculatedRouteCoordinates = null;
     calculatedRouteProvider = null;
+    calculatedRouteSummary = null;
+    calculatedRouteHolds = null;
     routeDistanceKm = 0;
     if (routeDisplayLine) { map.removeLayer(routeDisplayLine); routeDisplayLine = null; }
     const status = $("route-address-status");
@@ -1152,11 +1181,12 @@ function updateAdaptiveUI() {
     const button = $("btn-adaptive");
     if (!button) return;
     button.classList.toggle("active", adaptiveSpeed);
+    button.setAttribute("aria-pressed", adaptiveSpeed ? "true" : "false");
     $("adaptive-note").classList.toggle("hidden", !adaptiveSpeed);
-    $("speed-input").disabled = adaptiveSpeed;
     $("speed-input").title = adaptiveSpeed
-        ? "Adaptive is on — the speed follows posted limits"
-        : "";
+        ? "Your setting is the ceiling; adaptive caps it to posted limits"
+        : "Set the route speed ceiling";
+    renderCalculatedRouteStatus();
 }
 
 // ── Roam radius slider ───────────────────────────────────────
@@ -1222,7 +1252,7 @@ function updateRoamUI() {
     $("roam-unit-toggle").textContent = roamUnitMiles !== false ? "mi" : "km";
 }
 
-async function startRoaming(silent = false) {
+async function startRoaming(silent = false, fromLocation = null) {
     const radius = roamRadiusMetres();
     if (!roamCentre || !radius) return toast("Pick a centre and a radius first", "error");
     const speed = readSpeedKmh() || selectedSpeed;
@@ -1233,9 +1263,14 @@ async function startRoaming(silent = false) {
     try {
         // Enough road for roughly half an hour before a fresh path is needed.
         const targetKm = Math.max(1, (speed * 0.5));
+        const routeRequest = { lat: roamCentre.lat, lon: roamCentre.lon, radius, target_km: targetKm };
+        if (fromLocation && Number.isFinite(fromLocation.lat) && Number.isFinite(fromLocation.lon)) {
+            routeRequest.from_lat = fromLocation.lat;
+            routeRequest.from_lon = fromLocation.lon;
+        }
         const r = await fetch("/api/roam/route", {
             method: "POST", headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ lat: roamCentre.lat, lon: roamCentre.lon, radius, target_km: targetKm })
+            body: JSON.stringify(routeRequest)
         });
         const data = await r.json();
         if (!r.ok) { roamActive = false; updateRoamUI(); return toast(data.error || "Could not find roads there", "error"); }
@@ -1277,7 +1312,20 @@ function drawRoamPath(coordinates) {
 // going without repeating the same loop.
 async function continueRoaming() {
     if (!roamActive) return;
-    await startRoaming(true);
+    let fromLocation = null;
+    try {
+        // The tracking poll stops with the completed route, so its cached
+        // coordinate can lag behind the phone at precisely this seam.
+        const response = await fetch("/api/location/current");
+        if (response.ok) {
+            const current = await response.json();
+            const currentLat = finiteNumber(current.lat), currentLon = finiteNumber(current.lon);
+            if (currentLat != null && currentLon != null) {
+                fromLocation = { lat: currentLat, lon: currentLon };
+            }
+        }
+    } catch (e) { /* the server will start from the scattered point */ }
+    await startRoaming(true, fromLocation);
 }
 
 async function stopRoaming() {
@@ -1484,12 +1532,46 @@ function drawCalculatedRoute(data, label) {
     calculatedRouteCoordinates = data.coordinates;
     calculatedRouteProvider = data.provider;
     routeDistanceKm = data.distance_km;
+    calculatedRouteSummary = {
+        distanceKm: finiteNumber(data.distance_km),
+        googleEtaMin: finiteNumber(data.duration_min),
+        routeName: typeof data.route_name === "string" ? data.route_name : "",
+    };
+    calculatedRouteHolds = Array.isArray(data.stop_indices)
+        ? data.stop_indices
+            .filter((index, position, indices) => Number.isInteger(index) && index > 0
+                && index < data.coordinates.length - 1 && indices.indexOf(index) === position)
+            .map(index => [index, "waypoint"])
+        : null;
     if (routeLine) { map.removeLayer(routeLine); routeLine = null; }
     routeDisplayLine = L.polyline(data.coordinates.map(c => [c[1], c[0]]), { color: "#6F999A", weight: 3, opacity: 0.78 }).addTo(map);
     map.fitBounds(routeDisplayLine.getBounds(), { padding: [35, 35] });
     updateRouteUI();
     // After updateRouteUI, which writes its own generic hint.
     $("route-hint").textContent = label;
+}
+
+function renderCalculatedRouteStatus() {
+    const status = $("route-address-status");
+    if (!status || !calculatedRouteSummary) return;
+    const summary = calculatedRouteSummary;
+    const speedKmh = readSpeedKmh() || selectedSpeed;
+    const googleEta = summary.googleEtaMin == null ? null : formatEtaSeconds(summary.googleEtaMin * 60);
+    const projection = summary.distanceKm == null || !(speedKmh > 0)
+        ? null
+        : formatEtaSeconds((summary.distanceKm / speedKmh) * 3600);
+    const googleParts = [];
+    if (googleEta) googleParts.push("Google ETA: " + googleEta);
+    if (summary.distanceKm != null) googleParts.push(formatRouteDistance(summary.distanceKm));
+    if (summary.routeName) googleParts.push(summary.routeName);
+    let text = googleParts.join(" · ");
+    if (projection) {
+        text += (text ? ". " : "") + "At your " + formatSpeed(speedKmh) + " ceiling: "
+            + projection + " minimum, not a promised ETA.";
+        if (adaptiveSpeed) text += " Adaptive may go slower for posted limits and junction stops.";
+    }
+    status.className = "route-address-status success";
+    status.textContent = text;
 }
 
 async function calculateAddressRoute() {
@@ -1509,9 +1591,7 @@ async function calculateAddressRoute() {
         const data = await response.json();
         if (!response.ok) { status.className = "route-address-status error"; status.textContent = data.error || "Route calculation failed"; return toast(status.textContent, "error"); }
         drawCalculatedRoute(data, data.legs > 1 ? data.legs + " legs ready" : "Google route ready");
-        const miles = data.distance_km * 0.621371;
-        status.className = "route-address-status success";
-        status.textContent = "Google · " + miles.toFixed(1) + " mi · " + data.duration_min + " min · " + data.route_name;
+        renderCalculatedRouteStatus();
         toast("Route calculated");
     } catch (error) {
         status.className = "route-address-status error"; status.textContent = "Google Maps route service is unavailable"; toast(status.textContent, "error");
@@ -1522,7 +1602,9 @@ async function calculateAddressRoute() {
 
 async function startRoute() {
     if (routePoints.length < 2) return; const speed = readSpeedKmh() || selectedSpeed; const mode = $("route-mode").value; const randomize = $("speed-randomize").checked;
-    try { const r = await fetch("/api/route/start", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ waypoints: routePoints, speed, mode, randomize_speed: randomize, coordinates: calculatedRouteCoordinates, provider: calculatedRouteProvider, adaptive: adaptiveSpeed }) }); const d = await r.json(); if (!r.ok) return toast(d.error || "Route failed", "error");
+    const routeRequest = { waypoints: routePoints, speed, mode, randomize_speed: randomize, coordinates: calculatedRouteCoordinates, provider: calculatedRouteProvider, adaptive: adaptiveSpeed };
+    if (calculatedRouteHolds !== null) routeRequest.holds = calculatedRouteHolds;
+    try { const r = await fetch("/api/route/start", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(routeRequest) }); const d = await r.json(); if (!r.ok) return toast(d.error || "Route failed", "error");
     routeDistanceKm = d.distance_km || 0;
     if (d.coordinates) {
         if (routeLine) { map.removeLayer(routeLine); routeLine = null; }
@@ -1557,14 +1639,60 @@ function drawTravelled(pct) {
     routeTraveledLine = L.polyline(path, { color: "#EAF2EC", weight: 4, opacity: 0.9 }).addTo(map);
 }
 
+function renderRouteSpeedStatus(data, targetOverride = null) {
+    const statusSpeed = $("status-speed-text");
+    if (!statusSpeed) return;
+    const currentSpeed = finiteNumber(data.speed_kmh);
+    const reportedTarget = finiteNumber(data.target_speed_kmh);
+    const override = finiteNumber(targetOverride);
+    const targetSpeed = override == null ? reportedTarget : override;
+    const routeAdaptive = typeof data.adaptive === "boolean" ? data.adaptive : adaptiveSpeed;
+    if (currentSpeed != null) {
+        // Older servers have only speed_kmh. Keep their compact readout until
+        // the richer status fields arrive instead of inventing missing values.
+        if (targetSpeed == null && typeof data.holding !== "boolean" && typeof data.adaptive !== "boolean") {
+            statusSpeed.textContent = formatSpeed(currentSpeed) + (adaptiveSpeed ? " · adaptive" : "");
+            return;
+        }
+        const speedParts = [data.holding === true ? "Stopped briefly" : "Current " + formatSpeed(currentSpeed)];
+        if (targetSpeed != null) speedParts.push("Target " + formatSpeed(targetSpeed));
+        if (routeAdaptive) speedParts.push("Adaptive cap");
+        statusSpeed.textContent = speedParts.join(" · ");
+    } else if (data.holding === true) {
+        const speedParts = ["Stopped briefly"];
+        if (targetSpeed != null) speedParts.push("Target " + formatSpeed(targetSpeed));
+        if (routeAdaptive) speedParts.push("Adaptive cap");
+        statusSpeed.textContent = speedParts.join(" · ");
+    }
+}
+
 async function pollRoute() {
     try { const r = await fetch("/api/route/status"); if (!r.ok) { endRoute(); return; } const d = await r.json();
-    $("progress-bar").style.width = d.progress_pct + "%"; $("route-pct").textContent = Math.round(d.progress_pct) + "%";
-    drawTravelled(d.progress_pct);
-    if (d.speed_kmh != null && $("status-speed-text")) {
-        $("status-speed-text").textContent = formatSpeed(d.speed_kmh) + (adaptiveSpeed ? " · adaptive" : "");
+    lastRouteStatus = d;
+    const progressValue = finiteNumber(d.progress_pct);
+    const progress = progressValue == null ? 0 : Math.max(0, Math.min(100, progressValue));
+    $("progress-bar").style.width = progress + "%"; $("route-pct").textContent = Math.round(progress) + "%";
+    drawTravelled(progress);
+    renderRouteSpeedStatus(d);
+    if ($("status-route")) {
+        $("status-route").classList.remove("hidden");
+        const remainingValue = finiteNumber(d.remaining_km);
+        const totalDistance = finiteNumber(routeDistanceKm);
+        const remaining = remainingValue != null && remainingValue >= 0
+            ? remainingValue
+            : Math.max(0, (totalDistance || 0) * (1 - progress / 100));
+        const durationMin = finiteNumber(d.duration_min);
+        let eta = formatEtaSeconds(d.eta_seconds);
+        if (eta == null && durationMin != null && durationMin >= 0) {
+            eta = formatEtaSeconds(durationMin * 60 * (1 - progress / 100));
+        }
+        const routeParts = [formatRouteDistance(remaining) + " left"];
+        if (eta != null) routeParts.push("ETA " + eta);
+        const planned = durationMin == null ? null : formatEtaSeconds(durationMin * 60);
+        if (planned != null) routeParts.push(planned + " planned");
+        routeParts.push(Math.round(progress) + "%");
+        $("status-route-text").textContent = routeParts.join(" · ");
     }
-    if ($("status-route")) { $("status-route").classList.remove("hidden"); const rem = routeDistanceKm * (1 - d.progress_pct / 100); const eta = d.speed_kmh > 0 ? Math.round((rem / d.speed_kmh) * 60) : 0; $("status-route-text").textContent = formatRouteDistance(rem) + " | ETA " + eta + "m | " + Math.round(d.progress_pct) + "%"; }
     if (!d.active) {
         endRoute();
         if (d.error) {
@@ -1581,7 +1709,7 @@ async function pollRoute() {
     } catch (e) {}
 }
 
-function endRoute() { clearInterval(routePolling); routePolling = null; $("btn-route-start").disabled = false; $("btn-route-stop").disabled = true; $("btn-route-pause").classList.add("hidden"); $("btn-route-resume").classList.add("hidden"); $("route-progress").classList.add("hidden"); if ($("status-route")) $("status-route").classList.add("hidden"); if (routeTraveledLine) { map.removeLayer(routeTraveledLine); routeTraveledLine = null; } stopMovementTracking(); }
+function endRoute() { clearInterval(routePolling); routePolling = null; lastRouteStatus = null; $("btn-route-start").disabled = false; $("btn-route-stop").disabled = true; $("btn-route-pause").classList.add("hidden"); $("btn-route-resume").classList.add("hidden"); $("route-progress").classList.add("hidden"); if ($("status-route")) $("status-route").classList.add("hidden"); if (routeTraveledLine) { map.removeLayer(routeTraveledLine); routeTraveledLine = null; } stopMovementTracking(); updateStatusBar(); }
 
 // ── Live tracking ───────────────────────────────────────────
 function startMovementTracking() { if (movementPolling) return; movementPolling = setInterval(pollPosition, 500); }
@@ -1657,45 +1785,78 @@ async function pollCooldown() {
 }
 
 // ── Status bar ──────────────────────────────────────────────
-function updateStatusBar() { if ($("status-speed-text")) $("status-speed-text").textContent = formatSpeed(selectedSpeed); }
+function updateStatusBar() {
+    if (routePolling && lastRouteStatus && finiteNumber(lastRouteStatus.target_speed_kmh) != null) {
+        renderRouteSpeedStatus(lastRouteStatus, selectedSpeed);
+    } else if ($("status-speed-text")) {
+        $("status-speed-text").textContent = formatSpeed(selectedSpeed);
+    }
+    renderCalculatedRouteStatus();
+}
 
-// ── Stealth / Anti-detection ───────────────────────────────
+// ── Location consistency ──────────────────────────────────
 let _stealthDismissed = false;
 
 async function checkStealth() {
     try {
         const r = await fetch("/api/stealth/check");
+        if (!r.ok) throw new Error("Location consistency check failed");
         const d = await r.json();
         const banner = $("stealth-banner");
         const stealthPill = $("status-stealth");
         const stealthText = $("status-stealth-text");
         const stealthDot = $("status-stealth-dot");
-        // Update status bar pill
-        if (stealthPill) {
-            if (!d.warnings || !d.warnings.length) {
-                stealthText.textContent = "STEALTH"; stealthDot.className = "status-dot connected";
-            } else {
-                const hasHigh = d.warnings.some(w => w.severity === "high");
-                stealthText.textContent = hasHigh ? "EXPOSED" : "RISK";
-                stealthDot.className = "status-dot" + (hasHigh ? "" : " warning");
+        const checkAvailable = d.check_available === true;
+        const warnings = Array.isArray(d.warnings) ? d.warnings.slice() : [];
+
+        // The browser timezone is another consistency signal, not evidence that
+        // iOS sees the simulated position as a hardware-originated location.
+        if (checkAvailable && d.spoof_location) {
+            const browserOffsetH = -new Date().getTimezoneOffset() / 60;
+            const targetOffsetH = Math.round(d.spoof_location.lon / 15);
+            if (Math.abs(browserOffsetH - targetOffsetH) > 1
+                    && !warnings.find(w => w.type === "timezone_mismatch")) {
+                warnings.push({
+                    type: "timezone_mismatch", severity: "medium",
+                    message: "Browser timezone does not match the simulated location's approximate timezone."
+                });
             }
         }
-        // Banner
+
+        if (stealthPill) {
+            if (!checkAvailable) {
+                stealthText.textContent = d.unavailable_reason === "no_location" ? "CHECK NOT RUN" : "CHECK UNAVAILABLE";
+                stealthDot.className = "status-dot degraded";
+                stealthPill.title = "Location consistency check could not run";
+            } else if (!warnings.length) {
+                stealthText.textContent = "LOCATION CONSISTENT";
+                stealthDot.className = "status-dot connected";
+                stealthPill.title = "Simulated location, IP-based location, and approximate timezone are consistent; this does not test iOS simulation flags";
+            } else {
+                const hasHigh = warnings.some(w => w.severity === "high");
+                stealthText.textContent = hasHigh ? "LOCATION MISMATCH" : "CHECK WARNING";
+                stealthDot.className = "status-dot degraded";
+                stealthPill.title = "The location consistency check found a mismatch; this does not test iOS simulation flags";
+            }
+        }
+
         if (_stealthDismissed) return;
-        if (!d.warnings || !d.warnings.length) { banner.classList.add("hidden"); return; }
-        const sorted = d.warnings.sort((a, b) => (a.severity === "high" ? -1 : 1));
+        if (!checkAvailable) {
+            if (d.unavailable_reason === "no_location") { banner.classList.add("hidden"); return; }
+            $("stealth-banner-text").textContent = "Location consistency check could not run because IP-based location is unavailable.";
+            banner.className = "stealth-banner-medium";
+            return;
+        }
+        if (!warnings.length) { banner.classList.add("hidden"); return; }
+        const sorted = warnings.sort((a, b) => (a.severity === "high" ? -1 : 1));
         $("stealth-banner-text").textContent = sorted[0].message;
         banner.classList.remove("hidden");
         banner.className = "stealth-banner-" + sorted[0].severity;
-        // Client-side timezone check
-        if (d.spoof_location) {
-            const deviceOffsetH = -new Date().getTimezoneOffset() / 60;
-            const targetOffsetH = Math.round(d.spoof_location.lon / 15);
-            if (Math.abs(deviceOffsetH - targetOffsetH) > 1 && !d.warnings.find(w => w.type === "timezone_mismatch")) {
-                toast("Timezone mismatch: your device is UTC" + (deviceOffsetH >= 0 ? "+" : "") + deviceOffsetH + " but target is ~UTC" + (targetOffsetH >= 0 ? "+" : "") + targetOffsetH, "warning");
-            }
-        }
-    } catch (e) {}
+    } catch (e) {
+        if ($("status-stealth-text")) $("status-stealth-text").textContent = "CHECK UNAVAILABLE";
+        if ($("status-stealth-dot")) $("status-stealth-dot").className = "status-dot degraded";
+        if ($("status-stealth")) $("status-stealth").title = "Location consistency check could not run";
+    }
 }
 
 function toggleTips() { $("tips-overlay").classList.toggle("hidden"); }
