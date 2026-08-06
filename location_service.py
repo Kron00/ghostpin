@@ -74,6 +74,7 @@ class LocationService:
         self._route_duration = 0
         self._route_speed = 0
         self._route_speeds = None
+        self._route_error = None
         self._route_coordinates = None
         self._route_mode = "once"       # "once", "loop", "pingpong"
         self._speed_randomize = False
@@ -98,11 +99,11 @@ class LocationService:
 
     # ── Core ───────────────────────────────────────────────
 
-    def _sim_set(self, lat, lon):
+    def _sim_set(self, lat, lon, timeout=30):
         # DTX channels are stateful and are not safe for concurrent writes from
         # keep-alive, joystick, route, and schedule threads.
         with self._simulation_lock:
-            self.bridge.run(self.simulator.set(lat, lon))
+            self.bridge.run(self.simulator.set(lat, lon), timeout=timeout)
 
     def _sim_clear(self):
         with self._simulation_lock:
@@ -348,6 +349,7 @@ class LocationService:
         # One target speed per segment when the caller worked out a profile
         # from posted limits; otherwise a single speed for the whole route.
         self._route_speeds = list(speeds) if speeds else None
+        self._route_error = None
         self._route_mode = mode
         self._route_provider = provider
         self._speed_randomize = randomize_speed
@@ -402,6 +404,7 @@ class LocationService:
             self._route_progress = 0
             segment_index = 0
             traveled = 0.0
+            write_failures = 0
             last_update = time.monotonic()
 
             while traveled < path_distance and self._route_active:
@@ -452,10 +455,22 @@ class LocationService:
                 lat = start_lat + (end_lat - start_lat) * fraction
                 lng = start_lng + (end_lng - start_lng) * fraction
                 try:
-                    self._sim_set(lat, lng)
+                    self._sim_set(lat, lng, timeout=6)
                     self.current_location = {"lat": lat, "lon": lng}
-                except Exception:
-                    pass
+                    write_failures = 0
+                except Exception as exc:
+                    # One dropped write is nothing; a run of them means the
+                    # phone is gone. Freezing while still reporting "running"
+                    # is the worst of both, so say so and stop.
+                    write_failures += 1
+                    if write_failures >= 8:
+                        self._route_error = (
+                            "Lost contact with the iPhone — route stopped. "
+                            "Check it is plugged in and unlocked."
+                        )
+                        print(f"[!] Route stopped: {exc}")
+                        self._route_active = False
+                        break
                 self._route_progress = min(100.0, (traveled / path_distance) * 100)
 
             if self._route_mode == "once":
@@ -502,6 +517,7 @@ class LocationService:
             "distance_km": round(self._route_distance / 1000, 2),
             "duration_min": round(self._route_duration / 60, 1),
             "speed_kmh": self._route_speed,
+            "error": self._route_error,
             "mode": self._route_mode,
             "provider": getattr(self, "_route_provider", "osrm"),
         }

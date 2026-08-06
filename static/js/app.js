@@ -1429,6 +1429,13 @@ async function pollRoute() {
     if ($("status-route")) { $("status-route").classList.remove("hidden"); const rem = routeDistanceKm * (1 - d.progress_pct / 100); const eta = d.speed_kmh > 0 ? Math.round((rem / d.speed_kmh) * 60) : 0; $("status-route-text").textContent = formatRouteDistance(rem) + " | ETA " + eta + "m | " + Math.round(d.progress_pct) + "%"; }
     if (!d.active) {
         endRoute();
+        if (d.error) {
+            // The device stopped answering — do not quietly lay out more road.
+            roamActive = false;
+            if (typeof updateRoamUI === "function") updateRoamUI();
+            pollDevice();
+            return toast(d.error, "error");
+        }
         if (roamActive) { continueRoaming(); return; }
         toast("Route completed");
         if ($("btn-route-save")) $("btn-route-save").style.display = "";
