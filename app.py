@@ -1059,6 +1059,221 @@ def _trim_backtracks(coordinates):
     return out
 
 
+# ── Roam as a random walk on the road graph ───────────────────
+# Roam used to pre-calculate a whole tour through scattered waypoints, which
+# drew a giant route on the map and inherited OSRM's dead-end detours. Instead,
+# fetch the area's drivable roads once, prune dead ends from the graph, and
+# wander it turn by turn: at each junction pick a road at random, avoiding the
+# one just driven and recently used ones. Only a modest chunk is generated per
+# request; the client stitches chunks endlessly and shows a short lookahead.
+
+_ROAM_GRAPH_CACHE = {}
+_ROAM_GRAPH_CACHE_MAX = 4
+_ROAM_RECENT_EDGES = 12
+
+
+def _fetch_road_graph(lat, lon, radius_m):
+    """The drivable road graph inside the circle, dead ends pruned, or None."""
+    cache_key = (round(lat, 4), round(lon, 4), int(radius_m))
+    if cache_key in _ROAM_GRAPH_CACHE:
+        return _ROAM_GRAPH_CACHE[cache_key]
+
+    d_lat = radius_m / 111320.0
+    d_lon = radius_m / (111320.0 * math.cos(math.radians(lat)))
+    bbox = f"{lat - d_lat},{lon - d_lon},{lat + d_lat},{lon + d_lon}"
+    query = (
+        "[out:json][timeout:50];("
+        f'way[highway~"^(motorway|trunk|primary|secondary|tertiary|unclassified'
+        f'|residential|living_street|road)(_link)?$"]({bbox});'
+        f'node[highway~"^(stop|give_way|traffic_signals)$"]({bbox});'
+        ");out geom;"
+    )
+    elements = _overpass_elements(query)
+    if not elements:
+        return None
+
+    cos_lat = math.cos(math.radians(lat))
+
+    def inside(nlat, nlon):
+        dy = (nlat - lat) * 111320.0
+        dx = (nlon - lon) * 111320.0 * cos_lat
+        return math.hypot(dx, dy) <= radius_m
+
+    ways = []
+    junction_kinds = {}
+    node_uses = {}
+    for element in elements:
+        if not isinstance(element, dict):
+            continue
+        if element.get("type") == "way":
+            tags = element.get("tags") or {}
+            speed = _parse_maxspeed(tags.get("maxspeed")) or \
+                _CLASS_DEFAULT_KMH.get(tags.get("highway"))
+            node_ids = element.get("nodes") or []
+            geometry = element.get("geometry") or []
+            if not speed or len(node_ids) != len(geometry) or len(node_ids) < 2:
+                continue
+            ways.append((node_ids, geometry, speed))
+            for node_id in node_ids:
+                node_uses[node_id] = node_uses.get(node_id, 0) + 1
+        elif element.get("type") == "node":
+            highway = (element.get("tags") or {}).get("highway")
+            if highway in ("stop", "give_way", "traffic_signals"):
+                kind = "signal" if highway == "traffic_signals" else "stop"
+                junction_kinds[element["id"]] = kind
+
+    # Split ways into edges at junctions (nodes shared between ways) and way
+    # ends. An edge with any vertex outside the circle is dropped, so roads
+    # leaving the area become stubs that the dead-end pruning removes.
+    edges = []
+    adjacency = {}
+    for node_ids, geometry, speed in ways:
+        cut = [0]
+        for index in range(1, len(node_ids) - 1):
+            if node_uses[node_ids[index]] > 1:
+                cut.append(index)
+        cut.append(len(node_ids) - 1)
+        for a, b in zip(cut, cut[1:]):
+            seg_ids = node_ids[a:b + 1]
+            seg_pts = [(float(p["lon"]), float(p["lat"])) for p in geometry[a:b + 1]]
+            if len(seg_ids) < 2:
+                continue
+            if not all(inside(p[1], p[0]) for p in seg_pts):
+                continue
+            edge_id = len(edges)
+            edges.append({
+                "a": seg_ids[0], "b": seg_ids[-1],
+                "ids": seg_ids, "points": seg_pts, "speed": speed,
+            })
+            adjacency.setdefault(seg_ids[0], set()).add(edge_id)
+            adjacency.setdefault(seg_ids[-1], set()).add(edge_id)
+
+    # Prune dead ends: any node reachable only one way is somewhere a wanderer
+    # would have to double back out of, which is exactly the look to avoid.
+    queue = [n for n, e in adjacency.items() if len(e) == 1]
+    removed = set()
+    while queue:
+        node = queue.pop()
+        live = [e for e in adjacency.get(node, ()) if e not in removed]
+        if len(live) != 1:
+            continue
+        edge_id = live[0]
+        removed.add(edge_id)
+        edge = edges[edge_id]
+        other = edge["b"] if edge["a"] == node else edge["a"]
+        adjacency[node].discard(edge_id)
+        adjacency[other].discard(edge_id)
+        if len(adjacency[other]) == 1:
+            queue.append(other)
+
+    live_adjacency = {n: e for n, e in adjacency.items() if e}
+    if not live_adjacency:
+        return None
+
+    graph = {"edges": edges, "adjacency": live_adjacency,
+             "junction_kinds": junction_kinds}
+    if len(_ROAM_GRAPH_CACHE) >= _ROAM_GRAPH_CACHE_MAX:
+        _ROAM_GRAPH_CACHE.pop(next(iter(_ROAM_GRAPH_CACHE)))
+    _ROAM_GRAPH_CACHE[cache_key] = graph
+    return graph
+
+
+def _random_walk(graph, start_lat, start_lon, target_km):
+    """Wander the graph from the nearest road: coordinates, speeds, holds."""
+    edges, adjacency = graph["edges"], graph["adjacency"]
+    junction_kinds = graph["junction_kinds"]
+    cos_lat = math.cos(math.radians(start_lat))
+
+    def metres(a, b):
+        dy = (a[1] - b[1]) * 111320.0
+        dx = (a[0] - b[0]) * 111320.0 * cos_lat
+        return math.hypot(dx, dy)
+
+    # Snap to the closest vertex of any live edge.
+    start = (start_lon, start_lat)
+    best = None
+    for edge_id, edge in enumerate(edges):
+        if edge["a"] not in adjacency or edge_id not in adjacency[edge["a"]]:
+            continue
+        for index, point in enumerate(edge["points"]):
+            distance = metres(point, start)
+            if best is None or distance < best[0]:
+                best = (distance, edge_id, index)
+    if best is None:
+        return None
+    _, edge_id, index = best
+
+    coordinates = []
+    speeds = []
+    holds = []
+    recent = []
+
+    def append_leg(points, ids, speed):
+        for point, node_id in zip(points, ids):
+            if coordinates and coordinates[-1] == list(point):
+                continue
+            coordinates.append(list(point))
+            if len(coordinates) > 1:
+                speeds.append(round(speed, 2))
+            kind = junction_kinds.get(node_id)
+            if kind:
+                holds.append([len(coordinates) - 1, kind])
+
+    # First leg: from the snapped vertex to whichever end of that edge is
+    # farther along it, so the walk starts by driving the road it is on.
+    edge = edges[edge_id]
+    if index <= len(edge["points"]) // 2:
+        points, ids, node = (list(reversed(edge["points"][:index + 1])),
+                             list(reversed(edge["ids"][:index + 1])), edge["a"])
+    else:
+        points, ids, node = (edge["points"][index:], edge["ids"][index:], edge["b"])
+    append_leg(points, ids, edge["speed"])
+    recent.append(edge_id)
+
+    travelled = 0.0
+    for i in range(1, len(coordinates)):
+        travelled += metres(tuple(coordinates[i - 1]), tuple(coordinates[i]))
+
+    target_m = target_km * 1000
+    # Bounded by edges, not distance, purely as a runaway guard.
+    for _ in range(2000):
+        if travelled >= target_m:
+            break
+        options = [e for e in adjacency.get(node, ()) if e != recent[-1]]
+        if not options:
+            options = list(adjacency.get(node, ()))
+            if not options:
+                break
+        fresh = [e for e in options if e not in recent]
+        edge_id = random.choice(fresh or options)
+        edge = edges[edge_id]
+        if edge["a"] == node:
+            points, ids, node = edge["points"], edge["ids"], edge["b"]
+        else:
+            points, ids, node = (list(reversed(edge["points"])),
+                                 list(reversed(edge["ids"])), edge["a"])
+        before = len(coordinates)
+        append_leg(points, ids, edge["speed"])
+        for i in range(max(1, before), len(coordinates)):
+            travelled += metres(tuple(coordinates[i - 1]), tuple(coordinates[i]))
+        recent.append(edge_id)
+        recent[:] = recent[-_ROAM_RECENT_EDGES:]
+
+    if len(coordinates) < 3:
+        return None
+    return {
+        "provider": "roam",
+        "coordinates": coordinates,
+        "speeds": speeds,
+        "holds": holds,
+        "waypoints": [
+            {"lat": coordinates[0][1], "lng": coordinates[0][0]},
+            {"lat": coordinates[-1][1], "lng": coordinates[-1][0]},
+        ],
+        "distance_km": round(travelled / 1000, 2),
+    }
+
+
 def _roam_tour(lat, lon, radius_m, spread, sectors, from_lat=None, from_lon=None):
     """One candidate tour: a destination per sector, joined by road."""
     offset = random.uniform(0, 2 * math.pi)
@@ -1182,9 +1397,17 @@ def api_roam_route():
     if not _search_allowed():
         return jsonify({"error": "Too many requests, slow down"}), 429
 
-    route = _roam_route(
-        lat, lon, radius, max(1.0, min(target_km, 60.0)), from_lat, from_lon
-    )
+    # Wander the road graph turn by turn. The scattered-waypoint tour survives
+    # only as a fallback for when every Overpass mirror is unreachable.
+    target = max(1.0, min(target_km, 60.0))
+    graph = _fetch_road_graph(lat, lon, radius)
+    if graph:
+        walk_lat = from_lat if from_lat is not None else lat
+        walk_lon = from_lon if from_lon is not None else lon
+        route = _random_walk(graph, walk_lat, walk_lon, target)
+        if route:
+            return jsonify(route)
+    route = _roam_route(lat, lon, radius, target, from_lat, from_lon)
     if not route:
         return jsonify({"error": "No roads found in that area. Try a larger radius."}), 404
     return jsonify(route)
@@ -1576,17 +1799,31 @@ def api_route_start():
         gps_noise = data.get("gps_noise", True)
         if not isinstance(gps_noise, bool):
             raise ValueError("GPS noise must be true or false")
-    except ValueError as exc:
-        return jsonify({"error": str(exc)}), 400
+        client_speeds = data.get("speeds")
+        if client_speeds is not None:
+            if (not isinstance(client_speeds, list) or not coordinates
+                    or len(client_speeds) != len(coordinates) - 1):
+                raise ValueError("Speed profile must contain one speed per route segment")
+            client_speeds = [float(value) for value in client_speeds]
+            if any(not math.isfinite(v) or not 1 <= v <= 300 for v in client_speeds):
+                raise ValueError("Speed profile values must be between 1 and 300 km/h")
+    except (TypeError, ValueError) as exc:
+        return jsonify({"error": str(exc) or "Invalid route request"}), 400
 
     speeds = None
     adaptive_holds = []
     adaptive_used = False
     if data.get("adaptive") and coordinates:
-        profile = _fetch_speed_profile(coordinates, speed)
-        if profile is not None:
-            speeds, adaptive_holds = profile
-            adaptive_used = speeds is not None
+        # A roam walk already knows each road's limit from the graph; only
+        # fetch a profile when the caller could not supply one.
+        if client_speeds is not None:
+            speeds = client_speeds
+            adaptive_used = True
+        else:
+            profile = _fetch_speed_profile(coordinates, speed)
+            if profile is not None:
+                speeds, adaptive_holds = profile
+                adaptive_used = speeds is not None
 
     try:
         holds = _merge_route_holds(

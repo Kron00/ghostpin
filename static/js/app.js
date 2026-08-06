@@ -1316,8 +1316,9 @@ async function startRoaming(silent = false, fromLocation = null) {
     if (!silent) toast("Finding roads to roam…");
 
     try {
-        // Enough road for roughly half an hour before a fresh path is needed.
-        const targetKm = Math.max(1, (speed * 0.5));
+        // A short chunk (~10 minutes of driving): the walk is generated as it
+        // goes, so the map never shows a giant pre-planned tour.
+        const targetKm = Math.max(1, (speed * 0.15));
         const routeRequest = { lat: roamCentre.lat, lon: roamCentre.lon, radius, target_km: targetKm };
         if (fromLocation && Number.isFinite(fromLocation.lat) && Number.isFinite(fromLocation.lon)) {
             routeRequest.from_lat = fromLocation.lat;
@@ -1330,14 +1331,20 @@ async function startRoaming(silent = false, fromLocation = null) {
         const data = await r.json();
         if (!r.ok) { return failRoam(silent, data.error || "Could not find roads there"); }
 
+        const startRequest = {
+            waypoints: data.waypoints, speed, mode: "once",
+            randomize_speed: $("speed-randomize").checked,
+            coordinates: data.coordinates, provider: "roam",
+            adaptive: adaptiveSpeed
+        };
+        // Realistic: the walk already knows each road's limit and its signs.
+        if (adaptiveSpeed && Array.isArray(data.speeds) && data.speeds.length) {
+            startRequest.speeds = data.speeds;
+            if (Array.isArray(data.holds)) startRequest.holds = data.holds;
+        }
         const start = await fetch("/api/route/start", {
             method: "POST", headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-                waypoints: data.waypoints, speed, mode: "once",
-                randomize_speed: $("speed-randomize").checked,
-                coordinates: data.coordinates, provider: "roam",
-                adaptive: adaptiveSpeed
-            })
+            body: JSON.stringify(startRequest)
         });
         const started = await start.json();
         if (!start.ok) { return failRoam(silent, started.error || "Could not start roaming"); }
@@ -1363,10 +1370,45 @@ async function startRoaming(silent = false, fromLocation = null) {
 }
 
 let roamPathLine = null;
+let roamChunkCoords = null;
+let roamChunkIdx = 0;
+
+// Roam is a random wander, so drawing the whole chunk would spoil it and
+// clutter the map. Keep the geometry and show only a short tail of road ahead
+// of the dot — enough to see where the next turn goes.
 function drawRoamPath(coordinates) {
-    if (roamPathLine) map.removeLayer(roamPathLine);
-    roamPathLine = L.polyline(coordinates.map(c => [c[1], c[0]]),
-        { color: "#79C2B8", weight: 3, opacity: 0.75 }).addTo(map);
+    roamChunkCoords = coordinates;
+    roamChunkIdx = 0;
+    if (roamPathLine) { map.removeLayer(roamPathLine); roamPathLine = null; }
+    if (coordinates?.length) updateRoamLookahead(coordinates[0][1], coordinates[0][0]);
+}
+
+function updateRoamLookahead(lat, lon) {
+    const coords = roamChunkCoords;
+    if (!coords || !coords.length) return;
+    const scale = Math.cos(lat * Math.PI / 180) * 111320;
+    const dist = (aLat, aLon, bLat, bLon) =>
+        Math.hypot((aLat - bLat) * 111320, (aLon - bLon) * scale);
+    // The dot only moves forward, so search a window ahead of the last match.
+    let best = roamChunkIdx, bestD = Infinity;
+    const end = Math.min(coords.length, roamChunkIdx + 250);
+    for (let i = roamChunkIdx; i < end; i++) {
+        const d = dist(lat, lon, coords[i][1], coords[i][0]);
+        if (d < bestD) { bestD = d; best = i; }
+    }
+    roamChunkIdx = best;
+    const tail = [[lat, lon]];
+    let acc = 0;
+    let prevLat = coords[best][1], prevLon = coords[best][0];
+    for (let i = best; i < coords.length && acc < 400; i++) {
+        const ptLat = coords[i][1], ptLon = coords[i][0];
+        acc += dist(prevLat, prevLon, ptLat, ptLon);
+        tail.push([ptLat, ptLon]);
+        prevLat = ptLat; prevLon = ptLon;
+    }
+    if (roamPathLine) roamPathLine.setLatLngs(tail);
+    else roamPathLine = L.polyline(tail,
+        { color: "#79C2B8", weight: 3, opacity: 0.7, dashArray: "7 7" }).addTo(map);
 }
 
 // When one stretch of road runs out, quietly lay out another so roaming keeps
@@ -1395,6 +1437,7 @@ async function stopRoaming() {
     try { await fetch("/api/route/stop", { method: "POST" }); } catch (e) { /* already stopped */ }
     try { await fetch("/api/wander/stop", { method: "POST" }); } catch (e) { /* legacy */ }
     if (roamPathLine) { map.removeLayer(roamPathLine); roamPathLine = null; }
+    roamChunkCoords = null;
     updateRoamUI();
     stopMovementTracking();
     toast("Roaming stopped");
@@ -1792,7 +1835,7 @@ function endRoute() { clearInterval(routePolling); routePolling = null; lastRout
 function startMovementTracking() { if (movementPolling) return; movementPolling = setInterval(pollPosition, 500); }
 function stopMovementTracking() { if (movementPolling) { clearInterval(movementPolling); movementPolling = null; } trailPoints = []; }
 async function pollPosition() {
-    if (!deviceReady()) return; try { const r = await fetch("/api/location/current"); if (!r.ok) return; const loc = await r.json(); activeSpoofLocation = { lat: loc.lat, lon: loc.lon }; placeMarker(loc.lat, loc.lon); if (followMode) { map.stop(); map.panTo([loc.lat, loc.lon], { animate: true, duration: 0.3, noMoveStart: true }); } } catch (e) {} }
+    if (!deviceReady()) return; try { const r = await fetch("/api/location/current"); if (!r.ok) return; const loc = await r.json(); activeSpoofLocation = { lat: loc.lat, lon: loc.lon }; placeMarker(loc.lat, loc.lon); if (roamActive) updateRoamLookahead(loc.lat, loc.lon); if (followMode) { map.stop(); map.panTo([loc.lat, loc.lon], { animate: true, duration: 0.3, noMoveStart: true }); } } catch (e) {} }
 
 // ── GPX ─────────────────────────────────────────────────────
 // ── Joystick ────────────────────────────────────────────────
