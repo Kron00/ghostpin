@@ -1002,90 +1002,86 @@ _ROAM_HIGHWAYS = (
 )
 
 
-def _roam_route(lat, lon, radius_m, target_km):
-    """A road-following random walk inside the radius. None if unavailable."""
-    radius_m = max(50.0, min(float(radius_m), 50000.0))
-    query = (
-        "[out:json][timeout:25];"
-        f'way[highway~"^({_ROAM_HIGHWAYS})$"](around:{radius_m:.0f},{lat:.6f},{lon:.6f});'
-        "out body geom;"
-    )
+def _roam_tour(lat, lon, radius_m, spread, sectors):
+    """One candidate tour: a destination per sector, joined by road."""
+    offset = random.uniform(0, 2 * math.pi)
+    points = []
+    for index in range(sectors):
+        angle = offset + (2 * math.pi * index / sectors) + random.uniform(-0.3, 0.3)
+        distance = radius_m * spread * random.uniform(0.5, 1.0)
+        d_lat = (distance * math.cos(angle)) / 111320.0
+        d_lon = (distance * math.sin(angle)) / (111320.0 * math.cos(math.radians(lat)))
+        points.append((lat + d_lat, lon + d_lon))
+    points.append(points[0])
+
+    coords = ";".join(f"{plon:.6f},{plat:.6f}" for plat, plon in points)
+    url = (f"https://router.project-osrm.org/route/v1/driving/{coords}"
+           "?geometries=geojson&overview=full")
     try:
-        response = http_requests.post(
-            "https://overpass-api.de/api/interpreter",
-            data={"data": query},
-            headers={"User-Agent": "Ghostpin/2.0 (https://github.com/Kron00/ghostpin)"},
-            timeout=25,
-        )
+        response = http_requests.get(url, timeout=20)
         response.raise_for_status()
-        elements = response.json().get("elements", [])
+        data = response.json()
     except (http_requests.RequestException, ValueError):
         return None
-
-    def metres(lat1, lon1, lat2, lon2):
-        dlat = (lat2 - lat1) * 111320.0
-        dlon = (lon2 - lon1) * 111320.0 * math.cos(math.radians(lat1))
-        return math.hypot(dlat, dlon)
-
-    # Undirected graph keyed by OSM node id; edges carry their own geometry so
-    # curves are preserved rather than cut into chords.
-    graph = {}
-    position = {}
-    for element in elements:
-        node_ids = element.get("nodes") or []
-        geometry = element.get("geometry") or []
-        if len(node_ids) != len(geometry) or len(node_ids) < 2:
-            continue
-        for index in range(len(node_ids) - 1):
-            a, b = node_ids[index], node_ids[index + 1]
-            pa, pb = geometry[index], geometry[index + 1]
-            if None in (pa.get("lat"), pb.get("lat")):
-                continue
-            # Discard anything reaching outside the area.
-            if (metres(lat, lon, pa["lat"], pa["lon"]) > radius_m
-                    or metres(lat, lon, pb["lat"], pb["lon"]) > radius_m):
-                continue
-            position[a] = (pa["lat"], pa["lon"])
-            position[b] = (pb["lat"], pb["lon"])
-            length = metres(pa["lat"], pa["lon"], pb["lat"], pb["lon"])
-            graph.setdefault(a, []).append((b, length))
-            graph.setdefault(b, []).append((a, length))
-
-    if len(graph) < 4:
+    if data.get("code") != "Ok" or not data.get("routes"):
         return None
 
-    start = min(graph, key=lambda nid: metres(lat, lon, *position[nid]))
-
-    target_m = max(400.0, float(target_km) * 1000.0)
-    coordinates = [[position[start][1], position[start][0]]]
-    travelled = 0.0
-    current, previous = start, None
-    # Bounded so a dead-end pocket cannot spin forever.
-    for _ in range(20000):
-        if travelled >= target_m:
-            break
-        options = graph.get(current) or []
-        if not options:
-            break
-        # Prefer not to double straight back, but take it at a dead end.
-        forward = [opt for opt in options if opt[0] != previous] or options
-        nxt, length = random.choice(forward)
-        coordinates.append([position[nxt][1], position[nxt][0]])
-        travelled += length
-        previous, current = current, nxt
-
-    if len(coordinates) < 3 or travelled < 200:
+    route = data["routes"][0]
+    geometry = route.get("geometry", {}).get("coordinates") or []
+    if len(geometry) < 3:
         return None
+
+    # Zero-length segments buy nothing and make the runner's arithmetic noisier.
+    cleaned = [geometry[0]]
+    for point in geometry[1:]:
+        previous = cleaned[-1]
+        if abs(point[0] - previous[0]) > 1e-7 or abs(point[1] - previous[1]) > 1e-7:
+            cleaned.append(point)
+    if len(cleaned) < 3:
+        return None
+
+    cos_lat = math.cos(math.radians(lat))
+    worst = 0.0
+    for plon, plat in cleaned:
+        dy = (plat - lat) * 111320.0
+        dx = (plon - lon) * 111320.0 * cos_lat
+        worst = max(worst, math.hypot(dx, dy))
 
     return {
         "provider": "roam",
-        "coordinates": coordinates,
+        "coordinates": cleaned,
         "waypoints": [
-            {"lat": coordinates[0][1], "lng": coordinates[0][0]},
-            {"lat": coordinates[-1][1], "lng": coordinates[-1][0]},
+            {"lat": cleaned[0][1], "lng": cleaned[0][0]},
+            {"lat": cleaned[-1][1], "lng": cleaned[-1][0]},
         ],
-        "distance_km": round(travelled / 1000, 2),
+        "distance_km": round(float(route.get("distance", 0)) / 1000, 2),
+        "max_from_centre_m": round(worst),
     }
+
+
+def _roam_route(lat, lon, radius_m, target_km):
+    """A road route touring the whole area, or None if it cannot be built.
+
+    A random walk from the centre hugs whichever road it starts on, so this
+    scatters a destination into every sector of the circle and lets OSRM join
+    them by road. Roads detour — around a lake, say — so the result is checked
+    against the radius and retried tighter rather than trusted: an area drawn
+    on the map that the phone then leaves by miles is a lie.
+    """
+    radius_m = max(120.0, min(float(radius_m), 50000.0))
+    sectors = max(5, min(9, int(target_km / 2) + 4))
+    allowed = radius_m * 1.3
+
+    best = None
+    for spread in (0.85, 0.6, 0.4):
+        tour = _roam_tour(lat, lon, radius_m, spread, sectors)
+        if not tour:
+            continue
+        if tour["max_from_centre_m"] <= allowed:
+            return tour
+        if best is None or tour["max_from_centre_m"] < best["max_from_centre_m"]:
+            best = tour
+    return best
 
 
 @app.route("/api/roam/route", methods=["POST"])
