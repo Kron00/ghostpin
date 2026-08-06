@@ -291,12 +291,15 @@
     <div class="hud-panel-body">
         <div class="panel-section">
             <div class="panel-section-title"><span>Speed</span></div>
-            <div class="field-row">
+            <div class="mode-tabs" role="tablist" aria-label="Speed mode">
+                <button id="mode-flat" class="mode-tab active" type="button" role="tab" aria-selected="true" title="Hold one speed you choose for the whole route.&#10;Example: set 30 mph and the phone cruises ~30 the whole way, whatever the road.">Flat</button>
+                <button id="mode-realistic" class="mode-tab" type="button" role="tab" aria-selected="false" title="Drive like a real car: each road's posted limit plus a random 1-15 mph over (never under), stopping at lights and signs.&#10;Example: a 45 mph road → ~46-60; a 25 mph street → ~26-40.">Realistic</button>
+            </div>
+            <div class="field-row" id="flat-speed-row">
                 <input type="number" id="speed-input" value="15" min="1" max="300" step="0.1" class="speed-field" aria-label="Movement speed" />
                 <button id="speed-unit-toggle" class="speed-unit-toggle" type="button" title="Switch between mph and km/h">km/h</button>
-                <button id="btn-adaptive" class="btn btn-ghost btn-xs" type="button" title="Drive at posted speed limits, stopping at signals and signs" aria-pressed="false">Adaptive</button>
             </div>
-            <p class="hint hidden" id="adaptive-note">Drives at the posted speed limit for each road and adds realistic stops at signals, signs, and route stops. Where no limit is posted it uses your speed above.</p>
+            <p class="hint hidden" id="adaptive-note">Drives each road's posted limit plus a random 1-15 mph over — never under — and stops at signals, signs, and route stops. Where no limit is posted it uses a typical local speed.</p>
         </div>
         <!-- How the route gets built: by address, by circle, or by map clicks -->
         <div class="panel-section">

@@ -1168,6 +1168,18 @@ def api_roam_route():
 
 _MPH_TO_KMH = 1.609344
 _ADAPTIVE_DEFAULT_KMH = 48.0        # ~30 mph where nothing is tagged
+
+# Most residential streets carry no `maxspeed` tag in OSM, which left realistic
+# mode with too little data and made it give up. Fall back to a typical limit
+# for the road's class (US defaults, mph) so every driveable road has a speed.
+_CLASS_DEFAULT_KMH = {
+    highway: mph * _MPH_TO_KMH for highway, mph in {
+        "motorway": 65, "motorway_link": 45, "trunk": 55, "trunk_link": 40,
+        "primary": 45, "primary_link": 30, "secondary": 40, "secondary_link": 30,
+        "tertiary": 35, "tertiary_link": 25, "unclassified": 30, "residential": 25,
+        "living_street": 15, "service": 15, "road": 30,
+    }.items()
+}
 _JUNCTION_RADIUS_M = 45.0
 _HOLD_DEDUP_M = 25.0
 _MATCH_RADIUS_M = 35.0
@@ -1187,6 +1199,38 @@ def _parse_maxspeed(value):
     if number <= 0:
         return None
     return number * _MPH_TO_KMH if match.group(2) == "mph" else number
+
+
+# The main Overpass instance frequently returns 504/429 under load. A single
+# failure there used to make adaptive silently fall back to a flat speed (a
+# 45 mph road driven at the slider's default), so try several public mirrors in
+# turn and take the first that answers.
+_OVERPASS_ENDPOINTS = (
+    "https://overpass-api.de/api/interpreter",
+    "https://overpass.kumi.systems/api/interpreter",
+    "https://overpass.private.coffee/api/interpreter",
+    "https://maps.mail.ru/osm/tools/overpass/api/interpreter",
+)
+
+
+def _overpass_elements(query):
+    """Return the elements for an Overpass query, trying each mirror in turn, or
+    None if every mirror fails."""
+    for url in _OVERPASS_ENDPOINTS:
+        try:
+            response = http_requests.post(
+                url,
+                data={"data": query},
+                headers={"User-Agent": "Ghostpin/2.0 (https://github.com/Kron00/ghostpin)"},
+                timeout=25,
+            )
+            response.raise_for_status()
+            elements = response.json().get("elements", [])
+            if isinstance(elements, list):
+                return elements
+        except (http_requests.RequestException, ValueError):
+            continue
+    return None
 
 
 def _fetch_speed_profile(coordinates, fallback_kmh):
@@ -1219,7 +1263,7 @@ def _fetch_speed_profile(coordinates, fallback_kmh):
         bbox = f"{south - pad},{west - pad},{north + pad},{east + pad}"
         query = (
             "[out:json][timeout:25];("
-            f'way[highway][maxspeed]({bbox});'
+            f'way[highway~"^(motorway|trunk|primary|secondary|tertiary|unclassified|residential|living_street|service|road)(_link)?$"]({bbox});'
             f'node[highway~"^(stop|give_way|traffic_signals)$"]({bbox});'
             ");out geom;"
         )
@@ -1251,14 +1295,35 @@ def _fetch_speed_profile(coordinates, fallback_kmh):
             if not isinstance(element, dict):
                 continue
             if element.get("type") == "way":
-                speed = _parse_maxspeed((element.get("tags") or {}).get("maxspeed"))
+                tags = element.get("tags") or {}
+                speed = _parse_maxspeed(tags.get("maxspeed"))
+                if not speed:
+                    # No posted limit — assume the class's typical limit, or skip
+                    # anything not driveable (footway, cycleway, path…).
+                    speed = _CLASS_DEFAULT_KMH.get(tags.get("highway"))
                 if not speed:
                     continue
+                # Densify along each segment so a route point sitting on this
+                # road matches even where the way's own vertices are far apart —
+                # long straights otherwise left most of the route "untagged" and
+                # tripped the sparse-coverage rejection below.
+                previous = None
                 for point in element.get("geometry", []) or []:
                     way_lat, way_lon = float(point["lat"]), float(point["lon"])
+                    if previous is not None:
+                        plat, plon = previous
+                        dlat = (way_lat - plat) * 111320.0
+                        dlon = (way_lon - plon) * 111320.0 * math.cos(math.radians(plat))
+                        steps = min(50, int(math.hypot(dlat, dlon) // 20.0))
+                        for s in range(1, steps + 1):
+                            fraction = s / (steps + 1)
+                            ilat = plat + (way_lat - plat) * fraction
+                            ilon = plon + (way_lon - plon) * fraction
+                            ways.setdefault(key(ilat, ilon), []).append((ilat, ilon, speed))
                     ways.setdefault(key(way_lat, way_lon), []).append(
                         (way_lat, way_lon, speed)
                     )
+                    previous = (way_lat, way_lon)
             elif element.get("type") == "node":
                 highway = (element.get("tags") or {}).get("highway")
                 if highway not in ("stop", "give_way", "traffic_signals"):

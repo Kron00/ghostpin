@@ -242,12 +242,8 @@ document.addEventListener("DOMContentLoaded", async () => {
         invalidateCalculatedRoute();
         updateRouteUI();
     });
-    $("btn-adaptive").addEventListener("click", () => {
-        adaptiveSpeed = !adaptiveSpeed;
-        localStorage.setItem("adaptive_speed", adaptiveSpeed ? "1" : "0");
-        updateAdaptiveUI();
-        toast(adaptiveSpeed ? "Adaptive speed on" : "Adaptive speed off");
-    });
+    $("mode-flat").addEventListener("click", () => setDriveMode(false));
+    $("mode-realistic").addEventListener("click", () => setDriveMode(true));
     updateAdaptiveUI();
 
     $("roam-radius-slider").addEventListener("input", () => syncRoamRadius("slider"));
@@ -1179,15 +1175,32 @@ function moveStop(from, to) {
 
 let adaptiveSpeed = localStorage.getItem("adaptive_speed") === "1";
 
+// Realistic mode has no speed field, so the profile's untagged fallback and the
+// total-failure fallback both need a sensible cruise. ~30 mph in km/h.
+const REALISTIC_FALLBACK_KMH = 48;
+
+// Flat drives the chosen speed; Realistic has no field, so send a sensible
+// cruise the server uses for untagged roads and if the limit lookup fails.
+function routeSpeedKmh() {
+    return adaptiveSpeed ? REALISTIC_FALLBACK_KMH : (readSpeedKmh() || selectedSpeed);
+}
+
+function setDriveMode(realistic) {
+    adaptiveSpeed = realistic;
+    localStorage.setItem("adaptive_speed", realistic ? "1" : "0");
+    updateAdaptiveUI();
+    toast(realistic ? "Realistic — posted limits, a few mph over" : "Flat speed");
+}
+
 function updateAdaptiveUI() {
-    const button = $("btn-adaptive");
-    if (!button) return;
-    button.classList.toggle("active", adaptiveSpeed);
-    button.setAttribute("aria-pressed", adaptiveSpeed ? "true" : "false");
-    $("adaptive-note").classList.toggle("hidden", !adaptiveSpeed);
-    $("speed-input").title = adaptiveSpeed
-        ? "Adaptive drives posted limits; your speed is used only where none is posted"
-        : "The speed to drive the whole route";
+    const flat = $("mode-flat"), real = $("mode-realistic");
+    if (!flat || !real) return;
+    flat.classList.toggle("active", !adaptiveSpeed);
+    flat.setAttribute("aria-selected", (!adaptiveSpeed).toString());
+    real.classList.toggle("active", adaptiveSpeed);
+    real.setAttribute("aria-selected", adaptiveSpeed.toString());
+    $("flat-speed-row")?.classList.toggle("hidden", adaptiveSpeed);
+    $("adaptive-note")?.classList.toggle("hidden", !adaptiveSpeed);
     renderCalculatedRouteStatus();
 }
 
@@ -1297,7 +1310,7 @@ async function startRoaming(silent = false, fromLocation = null) {
     if (!silent) adoptDotAsRoamCentre();
     const radius = roamRadiusMetres();
     if (!roamCentre || !radius) return toast("Pick a centre and a radius first", "error");
-    const speed = readSpeedKmh() || selectedSpeed;
+    const speed = routeSpeedKmh();
     const button = $("btn-roam-start");
     button.disabled = true;
     if (!silent) toast("Finding roads to roam…");
@@ -1656,7 +1669,7 @@ async function calculateAddressRoute() {
 }
 
 async function startRoute() {
-    if (routePoints.length < 2) return; const speed = readSpeedKmh() || selectedSpeed; const mode = $("route-mode").value; const randomize = $("speed-randomize").checked;
+    if (routePoints.length < 2) return; const speed = routeSpeedKmh(); const mode = $("route-mode").value; const randomize = $("speed-randomize").checked;
     const routeRequest = { waypoints: routePoints, speed, mode, randomize_speed: randomize, coordinates: calculatedRouteCoordinates, provider: calculatedRouteProvider, adaptive: adaptiveSpeed };
     if (calculatedRouteHolds !== null) routeRequest.holds = calculatedRouteHolds;
     try { const r = await fetch("/api/route/start", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(routeRequest) }); const d = await r.json(); if (!r.ok) return toast(d.error || "Route failed", "error");

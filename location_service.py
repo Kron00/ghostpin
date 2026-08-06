@@ -46,6 +46,12 @@ EMIT_LOSS_LIMIT = 0.01
 DRIVEN_PATH_SPACING_M = 5.0
 MAX_DRIVEN_PATH_POINTS = 25000
 
+# Realistic driving sits a random amount over the posted limit — never under,
+# because effectively no one does. One offset per trip, like a driver's habit.
+OVER_LIMIT_MIN_MPH = 1.0
+OVER_LIMIT_MAX_MPH = 15.0
+MPH_TO_KMH = 1.609344
+
 
 def _get_data_dir():
     """Get the user-writable data directory (platform-aware)."""
@@ -101,6 +107,7 @@ class LocationService:
         self._route_speed_target = 0
         self._route_speed_current = 0
         self._route_speeds = None
+        self._route_over_limit_kmh = 0.0
         self._route_holds = []
         self._route_holding = False
         self._route_hold_remaining = 0
@@ -459,6 +466,13 @@ class LocationService:
                 # One target speed per segment when the caller worked out a
                 # profile from posted limits; otherwise one speed governs all.
                 self._route_speeds = profile
+                # Realistic mode drives a random 1-15 mph over every posted
+                # limit, fixed for the trip. Flat mode has no profile and no
+                # offset.
+                self._route_over_limit_kmh = (
+                    random.uniform(OVER_LIMIT_MIN_MPH, OVER_LIMIT_MAX_MPH) * MPH_TO_KMH
+                    if profile else 0.0
+                )
                 self._route_holds = normalized_holds
                 self._route_error = None
                 self._route_mode = mode
@@ -677,7 +691,8 @@ class LocationService:
         if not self._route_speeds:
             return math.inf
         index = min(max(int(origin), 0), len(self._route_speeds) - 1)
-        return self._route_speeds[index] / 3.6
+        # Sit the trip's fixed amount over the posted limit — never under.
+        return (self._route_speeds[index] + self._route_over_limit_kmh) / 3.6
 
     @staticmethod
     def _expected_dwell(kind):
@@ -1412,6 +1427,10 @@ class LocationService:
                 self._route_speed_factor = 1.0
 
             factor = self._route_speed_factor
+            if self._route_speeds:
+                # Realistic never eases below its posted-limit-plus-offset cruise
+                # through jitter; only a corner or a stop (both in the plan) may.
+                factor = max(1.0, factor)
             if current_state["speed"] > 0.001:
                 factor = min(
                     factor,
