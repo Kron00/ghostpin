@@ -89,6 +89,7 @@ class LocationService:
         self._last_teleport_time = None
         self._last_teleport_coords = None
         self._cooldown_end = 0
+        self._last_known_position = None
 
         # Random wander state
         self._wander_active = False
@@ -110,10 +111,12 @@ class LocationService:
             self.bridge.run(self.simulator.clear())
 
     def set_location(self, lat, lon):
-        # Update cooldown before moving
-        if self.current_location:
-            old = self.current_location
-            dist = self._haversine(old["lat"], old["lon"], lat, lon) / 1000
+        # Cooldown is about how far the phone appears to have travelled, which
+        # is just as true of the first jump after a reset as of any other. Use
+        # the last position we knew, which outlives clear_location.
+        reference = self.current_location or self._last_known_position
+        if reference:
+            dist = self._haversine(reference["lat"], reference["lon"], lat, lon) / 1000
             self._cooldown_end = time.time() + self._calculate_cooldown(dist)
         self._last_teleport_time = time.time()
         self._last_teleport_coords = {"lat": lat, "lon": lon}
@@ -121,11 +124,14 @@ class LocationService:
         self._stop_keepalive()
         self._sim_set(lat, lon)
         self.current_location = {"lat": lat, "lon": lon}
+        self._last_known_position = {"lat": lat, "lon": lon}
         self._start_keepalive()
         return {"status": "Location set", "lat": lat, "lon": lon}
 
     def clear_location(self):
         self._stop_keepalive()
+        # Deliberately keep _last_known_position: the next jump is still a jump
+        # from where the phone was last pretending to be.
         self.current_location = None
         self._cooldown_end = 0
         self._last_teleport_time = None
@@ -161,7 +167,7 @@ class LocationService:
         return {
             "active": remaining > 0,
             "remaining_seconds": round(remaining),
-            "total_seconds": round(self._cooldown_end - (self._last_teleport_time or now)) if self._last_teleport_time else 0,
+            "total_seconds": max(0, round(self._cooldown_end - (self._last_teleport_time or now))) if self._last_teleport_time else 0,
             "last_teleport": self._last_teleport_time,
         }
 
