@@ -238,8 +238,7 @@ document.addEventListener("DOMContentLoaded", async () => {
         localStorage.setItem("roam_unit", roamUnitMiles ? "mi" : "km");
         if (metres) {
             const converted = roamUnitMiles ? metres / METRES_PER_MILE : metres / 1000;
-            const step = parseFloat($("roam-radius-slider").step) || 0.05;
-            $("roam-radius").value = (Math.round(converted / step) * step).toFixed(2);
+            $("roam-radius").value = converted.toFixed(2);
         }
         setRoamUnitBounds(); syncRoamRadius("field");
     });
@@ -1457,6 +1456,7 @@ function addStop() {
 function reverseStops() { routeStops.reverse(); renderStops(); }
 
 function setBuildMode(mode) {
+    if (mode !== "map" && mapPickTarget === "append") setMapPick(null);
     document.querySelectorAll(".mode-tab").forEach(tab => {
         const on = tab.dataset.build === mode;
         tab.classList.toggle("active", on);
@@ -1580,7 +1580,9 @@ const _keyMap = { w: "n", a: "w", s: "s", d: "e", arrowup: "n", arrowdown: "s", 
 let _activeKeys = new Set();
 let joystickCommand = Promise.resolve();
 function onKeyDown(e) {
-    if (e.target.tagName === "INPUT" || e.target.tagName === "TEXTAREA" || e.target.tagName === "SELECT") return;
+    const typing = e.target.tagName === "INPUT" || e.target.tagName === "TEXTAREA" || e.target.tagName === "SELECT";
+    // Escape is the way out of a form, so it must survive the typing guard.
+    if (typing && e.key !== "Escape") return;
     // Onboarding covers everything, so acting on a shortcut here would change
     // state the user cannot see.
     const onboarding = $("onboarding");
