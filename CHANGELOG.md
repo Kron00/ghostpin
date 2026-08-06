@@ -7,53 +7,64 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.1.0] — 2026-08-06
+
+Interface rebuild, a rethought route builder, adaptive speed, and the fixes
+from eight rounds of automated browser auditing — six of them against the UI,
+two against a real iPhone.
+
+### Added
+
+- **Routes with any number of stops**, lettered A, B, C…, filled from the
+  search bar or by pointing at the map, reorderable by drag or Alt+arrow, with
+  an option to return to the start and close the loop.
+- **Roam**: pick a centre and a radius and wander the real road network inside
+  it at random. It lays out a fresh stretch of road when one runs out, so it
+  keeps going indefinitely rather than repeating a loop.
+- **Adaptive speed** following posted limits from OpenStreetMap, easing off at
+  stop signs, give-ways and traffic signals. Google's limits sit behind a paid,
+  access-restricted API and are not usable.
+- Search results can be sent straight to a stop, and every address field has
+  the same autocomplete as the search bar.
+- Speed units follow the country the IP lookup reports until set by hand.
+
 ### Changed
 
-- Rebuilt the interface on a single design system. The coordinate readout is now
-  the anchor of the Location panel — tabular monospaced figures on an instrument
-  face — and the accent colour is reserved almost entirely for Warp, so the
-  primary action no longer looks identical to Reset, Undo, and Save.
-- Replaced the stacks of hairline dividers and inline-styled rows in the panels
-  with labelled sections, and grouped the floating status pills into one status
-  strip.
-- Rewrote the light theme. It is now a token-level override and nothing else,
-  which is what makes it maintainable; the previous version re-declared
-  component rules and drifted into near-illegible pale grey on cream.
-- Panels stack and scroll in document order below 940px instead of overlapping.
+- The interface was rebuilt on one design system, anchored on the coordinate
+  readout. Every visible text element meets WCAG AA in both themes.
+- The route builder is three explicit modes — Stops, Circle became Roam, and
+  Map — with a "?" explaining each.
+- Walk/Bike/Drive presets are gone; one speed field plus the Adaptive toggle.
+- Stops are filled from the search bar rather than typed into, so there is one
+  search field instead of several half-working ones.
+- Import/Export GPX removed in favour of Save route.
 
 ### Fixed
 
-- The light theme was effectively unreadable: most text sat between 1:1 and 3:1
-  against its background. Every visible text element now meets WCAG AA (4.5:1)
-  in both themes, verified by measuring composited colours in the browser.
-- Panel contents could overlap each other. The panel body is a height-capped
-  flex column, so its children shrank below their own content — the coordinate
-  readout was drawn on top of the latitude field.
-- The Places panel ran off the bottom of the window; it now takes the space left
-  under the Location panel and scrolls within it.
-- Removed the nested scroll region inside the Places panel.
-- Icon-only controls, the map, and the toast region had no accessible names.
-- GPX waypoint names were always discarded on import. An `Element` with no
-  children is falsy, so the fallback `or` in the namespace lookup threw away a
-  valid `<name>`.
+- The cooldown did not apply to the first jump after a Reset — usually the
+  longest, and the one most likely to look like impossible travel.
+- A route kept reporting itself as running when the phone went away, because
+  every write failure was being swallowed.
+- Editing the stops left a previously calculated route live, so Start would
+  drive the route you had just edited away from.
+- Onboarding was unusable under the Content-Security-Policy, which blocks the
+  inline handlers it relied on.
+- Roaming moved in straight lines across whatever was there; it follows roads.
+- Around thirty smaller faults found by the audits: coordinate format blanking
+  the fields, stale readouts, forms opening below the fold, controls colliding
+  at narrow widths, arrow keys firing device calls, labels that did not match
+  behaviour, and a favicon that 404'd on every load.
 
 ### Security
 
-- Reject requests carrying an unexpected `Host` header. Binding to loopback does
-  not stop a hostile page: a domain resolving to `127.0.0.1` makes the browser
-  treat the API as same-origin, which exposed the UDID, current location, and
-  saved history over plain GETs.
-- Reject cross-origin writes. Any page open in the browser could previously
-  submit a form POST to endpoints that take no body, resetting a spoof or
-  triggering a device reconnect.
-- Refuse GPX files that declare a `DOCTYPE` or entity, and cap imports at 16 MB
-  and 100,000 waypoints. ElementTree expands internal entities, so a small file
-  could otherwise exhaust memory on import.
-- Write the privileged tunnel log inside the user's own support directory rather
-  than a fixed path in world-writable `/tmp`, where it could be pre-created as a
-  symlink and truncated by the root shell.
-- Resolve `cmd.exe` by absolute path in the Windows elevation helper, so a
-  planted `cmd.exe` earlier on `PATH` cannot be what the user elevates.
+- Reject unexpected `Host` headers, blocking DNS rebinding against the local
+  API, and reject cross-origin writes.
+- Content-Security-Policy, `X-Content-Type-Options` and `Referrer-Policy`.
+- Verify the peer's UDID before driving it over the privileged fallback.
+- Cancel timed-out device coroutines; one lock owns the session lifecycle.
+- GPX imports refuse DOCTYPE/entity declarations and are size-capped.
+- UDIDs masked in logs and in the interface.
+- Dependencies pinned exactly; GitHub Actions pinned to commit SHAs.
 
 ## [2.0.0] — 2026-08-05
 
@@ -112,5 +123,6 @@ not distributed as Ghostpin releases. Their notable work included the initial
 Flask and Leaflet interface, Wi-Fi mode, Python 3.13 support, the anti-detection
 stealth suite, and the first `pymobiledevice3` v9 compatibility pass.
 
-[Unreleased]: https://github.com/Kron00/ghostpin/compare/v2.0.0...HEAD
+[Unreleased]: https://github.com/Kron00/ghostpin/compare/v2.1.0...HEAD
+[2.1.0]: https://github.com/Kron00/ghostpin/releases/tag/v2.1.0
 [2.0.0]: https://github.com/Kron00/ghostpin/releases/tag/v2.0.0

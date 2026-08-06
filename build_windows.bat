@@ -5,7 +5,7 @@
 setlocal enabledelayedexpansion
 
 set APP_NAME=Ghostpin
-set VERSION=2.0.0
+set VERSION=2.1.0
 
 echo ==================================================
 echo   Building %APP_NAME% v%VERSION% for Windows

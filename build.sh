@@ -6,7 +6,7 @@ cd "$SCRIPT_DIR"
 
 APP_NAME="Ghostpin"
 BUNDLE_ID="com.ghostpin.app"
-VERSION="2.0.0"
+VERSION="2.1.0"
 VENV_DIR="$SCRIPT_DIR/.venv"
 DIST_DIR="$SCRIPT_DIR/dist"
 APP_DIR="$DIST_DIR/$APP_NAME.app"

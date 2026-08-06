@@ -30,10 +30,14 @@ remain active until reset or the developer connection ends.
 
 - Click-to-spoof and one-click teleport mode
 - Locally biased Google Maps place search with coordinate and OSM fallback
-- Walking, cycling, and driving route simulation
-- WASD/arrow-key joystick and random wander mode
+- **Routes with any number of stops**, filled from the search bar or by
+  pointing at the map, reorderable, and optionally closing the loop
+- **Roam**: pick a centre and a radius and wander the real road network
+  inside it at random, indefinitely
+- **Adaptive speed** that follows posted limits from OpenStreetMap and eases
+  off at stop signs and traffic signals
+- WASD/arrow-key joystick control
 - Saved and recent locations, profiles, schedules, and route history
-- GPX import and export
 - Multi-device selection over USB or paired Wi-Fi
 - Cooldown, GPS jitter, IP/GPS mismatch, and timezone guidance
 - Dark and light cartographic themes in a native pywebview window
@@ -210,7 +214,7 @@ Outputs:
 
 ```text
 dist/Ghostpin.app
-dist/Ghostpin-2.0.0.dmg
+dist/Ghostpin-2.1.0.dmg
 ```
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for the full contributor guide, including

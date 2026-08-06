@@ -1676,7 +1676,7 @@ def api_docs():
                 "methods": sorted(rule.methods - {"OPTIONS", "HEAD"}),
             })
     endpoints.sort(key=lambda e: e["path"])
-    return jsonify({"endpoints": endpoints, "version": "2.0.0"})
+    return jsonify({"endpoints": endpoints, "version": "2.1.0"})
 
 
 # ── CLI Main (for start.sh usage) ─────────────────────────────
