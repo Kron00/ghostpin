@@ -1368,8 +1368,15 @@ async function startRoaming(silent = false, fromLocation = null, prefetchedData 
     const speed = routeSpeedKmh();
     const button = $("btn-roam-start");
     button.disabled = true;
-    if (!silent) { roamWalkState = null; roamPrefetch = null; }
-    if (!silent) toast("Finding roads to roam…");
+    if (!silent) {
+        roamWalkState = null;
+        roamPrefetch = null;
+        // A fresh roam begins from a clean slate. Stop any route still running
+        // — a stale session, or one this window lost track of — so the start is
+        // never locked out by "A route is already running".
+        try { await fetch("/api/route/stop", { method: "POST" }); } catch (e) { /* ignore */ }
+        toast("Finding roads to roam…");
+    }
 
     try {
         let data = prefetchedData;
@@ -1390,11 +1397,19 @@ async function startRoaming(silent = false, fromLocation = null, prefetchedData 
             startRequest.speeds = data.speeds;
             if (Array.isArray(data.holds)) startRequest.holds = data.holds;
         }
-        const start = await fetch("/api/route/start", {
+        const postStart = () => fetch("/api/route/start", {
             method: "POST", headers: { "Content-Type": "application/json" },
             body: JSON.stringify(startRequest)
         });
-        const started = await start.json();
+        let start = await postStart();
+        let started = await start.json();
+        // A race at a seam can leave the previous chunk's route briefly active;
+        // stop it and try once more rather than giving up.
+        if (!start.ok && /already running/i.test(started.error || "")) {
+            try { await fetch("/api/route/stop", { method: "POST" }); } catch (e) { /* ignore */ }
+            start = await postStart();
+            started = await start.json();
+        }
         if (!start.ok) { return failRoam(silent, started.error || "Could not start roaming"); }
 
         roamWalkState = data.walk_state || null;
