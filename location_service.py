@@ -1351,6 +1351,11 @@ class LocationService:
         elapsed = 0.0
         last_wall = time.monotonic()
         schedule_start = last_wall
+        # Unpaid travel time after a slow write. Capping the per-tick advance
+        # avoids a visible catch-up leap, but banking the remainder here (rather
+        # than discarding it) lets the route recover over the next few ticks
+        # instead of drifting permanently behind wall-clock.
+        advance_debt = 0.0
         deadline_index = 0
         scheduled_rate = self._target_emit_hz()
         self._route_noise_last_station = None
@@ -1369,6 +1374,7 @@ class LocationService:
                 resumed = time.monotonic()
                 last_wall = resumed
                 schedule_start = resumed
+                advance_debt = 0.0
                 deadline_index = 0
                 scheduled_rate = self._target_emit_hz()
             if not self._route_active:
@@ -1407,6 +1413,7 @@ class LocationService:
                 resumed = time.monotonic()
                 last_wall = resumed
                 schedule_start = resumed
+                advance_debt = 0.0
                 deadline_index = 0
                 scheduled_rate = self._target_emit_hz()
                 continue
@@ -1416,7 +1423,9 @@ class LocationService:
                 continue
             now = time.monotonic()
             self._route_emit_deadlines += 1
-            wall_elapsed = min(MAX_ROUTE_ADVANCE_S, max(0.0, now - last_wall))
+            advance_debt += max(0.0, now - last_wall)
+            wall_elapsed = min(MAX_ROUTE_ADVANCE_S, advance_debt)
+            advance_debt -= wall_elapsed
             last_wall = now
             if self._speed_randomize:
                 self._route_speed_factor += (
@@ -1493,6 +1502,7 @@ class LocationService:
                 resumed = time.monotonic()
                 last_wall = resumed
                 schedule_start = resumed
+                advance_debt = 0.0
                 deadline_index = 0
                 scheduled_rate = self._target_emit_hz()
                 continue

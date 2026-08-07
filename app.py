@@ -1040,6 +1040,11 @@ def _google_multi_stop_route(stops):
 
 _ROAM_GRAPH_CACHE = {}
 _ROAM_GRAPH_CACHE_MAX = 4
+# Bumped on every build so a graph evicted and rebuilt (Overpass may return
+# elements in a different order, shuffling edge IDs) gets a fresh identity. A
+# continuation carrying the old identity then falls back to a clean snap instead
+# of binding its node/edge IDs to a different road.
+_ROAM_GRAPH_BUILD = 0
 _ROAM_RECENT_EDGES = 12
 _ROAM_RECENT_NODES = 12
 _ROAM_MIN_TURN_DEG = 45.0
@@ -1179,22 +1184,36 @@ def _fetch_road_graph(lat, lon, radius_m):
         if len(adjacency[other]) == 1:
             queue.append(other)
 
+    # An edge's heading away from a junction is fixed geometry, but the cusp
+    # loop below asks for it repeatedly across passes. Memoise it — recomputing
+    # every pass was the bulk of a ~6 s graph build on a five-mile radius.
+    _outward_cache = {}
+
     def outward_vector(node, edge_id):
         """Metre vector pointing away from a junction along an incident edge."""
+        key = (node, edge_id)
+        cached = _outward_cache.get(key)
+        if cached is not None:
+            return cached
         edge = edges[edge_id]
         points = edge["points"] if edge["a"] == node else list(reversed(edge["points"]))
         origin = points[0]
+        result = None
         for point in points[1:]:
             dy = (point[1] - origin[1]) * 111320.0
             dx = ((point[0] - origin[0]) * 111320.0
                   * math.cos(math.radians(origin[1])))
             if math.hypot(dx, dy) >= _ROAM_HEADING_DISTANCE_M:
-                return dx, dy
-        point = points[-1]
-        return (
-            (point[0] - origin[0]) * 111320.0 * math.cos(math.radians(origin[1])),
-            (point[1] - origin[1]) * 111320.0,
-        )
+                result = (dx, dy)
+                break
+        if result is None:
+            point = points[-1]
+            result = (
+                (point[0] - origin[0]) * 111320.0 * math.cos(math.radians(origin[1])),
+                (point[1] - origin[1]) * 111320.0,
+            )
+        _outward_cache[key] = result
+        return result
 
     def angle_degrees(first, second):
         denominator = math.hypot(*first) * math.hypot(*second)
@@ -1439,9 +1458,12 @@ def _fetch_road_graph(lat, lon, radius_m):
         for edge_id in edge_ids
     }
 
+    global _ROAM_GRAPH_BUILD
+    _ROAM_GRAPH_BUILD += 1
     graph = {"edges": edges, "adjacency": live_adjacency,
              "outgoing": outgoing, "allowed_steps": allowed_steps,
              "junction_kinds": junction_kinds, "cache_key": cache_key,
+             "identity": [*cache_key, _ROAM_GRAPH_BUILD],
              "outward_vectors": outward_vectors}
     if len(_ROAM_GRAPH_CACHE) >= _ROAM_GRAPH_CACHE_MAX:
         _ROAM_GRAPH_CACHE.pop(next(iter(_ROAM_GRAPH_CACHE)))
@@ -1497,7 +1519,7 @@ def _random_walk(graph, start_lat, start_lon, target_km, walk_state=None):
                 and isinstance(state_recent, list)
                 and isinstance(state_steps, list)
                 and isinstance(state_history, list)
-                and state_key == list(graph["cache_key"])
+                and state_key == graph["identity"]
                 and state_node in adjacency):
             live_edges = set().union(*adjacency.values())
             cleaned_recent = [
@@ -1708,7 +1730,7 @@ def _random_walk(graph, start_lat, start_lon, target_km, walk_state=None):
         ],
         "distance_km": round(travelled / 1000, 2),
         "walk_state": {
-            "graph_key": list(graph["cache_key"]),
+            "graph_key": list(graph["identity"]),
             "node": node,
             "recent_edges": recent,
             "recent_steps": [list(step) for step in recent_steps],
