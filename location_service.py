@@ -115,6 +115,9 @@ class LocationService:
         self._route_posted_limit_kmh = None
         self._route_holds = []
         self._route_holding = False
+        self._route_hold_kind = None
+        self._route_next_hold_kind = None
+        self._route_next_hold_m = None
         self._route_hold_remaining = 0
         self._route_error = None
         self._route_coordinates = None
@@ -1297,6 +1300,13 @@ class LocationService:
             hold["expected"] for hold in plan["holds"]
             if hold["id"] not in consumed and hold["time"] > elapsed + 0.000001
         )
+        upcoming = self._future_hold(plan, consumed, elapsed)
+        if upcoming is not None:
+            self._route_next_hold_kind = upcoming["kind"]
+            self._route_next_hold_m = max(0.0, upcoming["distance"] - state["distance"])
+        else:
+            self._route_next_hold_kind = None
+            self._route_next_hold_m = None
         self._route_pass_distance = state["distance"]
         self._route_progress = (100.0 if plan["total_distance"] <= 0 else min(
             100.0, state["distance"] / plan["total_distance"] * 100
@@ -1307,8 +1317,10 @@ class LocationService:
             + expected_holds + hold_remaining
         )
 
-    def _route_dwell(self, state, duration, plan=None, elapsed=0, consumed=None):
+    def _route_dwell(self, state, duration, plan=None, elapsed=0, consumed=None,
+                     kind=None):
         self._route_holding = True
+        self._route_hold_kind = kind
         self._route_speed_current = 0
         self._route_hold_remaining = duration
         if duration > 0:
@@ -1336,6 +1348,7 @@ class LocationService:
             time.sleep(min(0.05, remaining))
         self._route_hold_remaining = 0
         self._route_holding = False
+        self._route_hold_kind = None
 
     def _drive_route_pass(self, plan_key, generation):
         with self._route_plan_lock:
@@ -1409,7 +1422,8 @@ class LocationService:
                 if written:
                     last_emitted_distance = current_state["distance"]
                 dwell = self._sample_dwell(next_hold["kind"])
-                self._route_dwell(current_state, dwell, plan, elapsed, consumed)
+                self._route_dwell(current_state, dwell, plan, elapsed, consumed,
+                                  kind=next_hold["kind"])
                 resumed = time.monotonic()
                 last_wall = resumed
                 schedule_start = resumed
@@ -1498,7 +1512,8 @@ class LocationService:
                 consumed.add(next_hold["id"])
                 self._route_speed_current = 0
                 dwell = self._sample_dwell(next_hold["kind"])
-                self._route_dwell(state, dwell, plan, elapsed, consumed)
+                self._route_dwell(state, dwell, plan, elapsed, consumed,
+                                  kind=next_hold["kind"])
                 resumed = time.monotonic()
                 last_wall = resumed
                 schedule_start = resumed
@@ -1538,7 +1553,8 @@ class LocationService:
                 plan = self._route_plans[plan_key]
                 endpoint = self._plan_state_at_time(plan, plan["movement_duration"])
             self._route_speed_current = 0
-            self._route_dwell(endpoint, self._sample_dwell("waypoint"))
+            self._route_dwell(endpoint, self._sample_dwell("waypoint"),
+                              kind="waypoint")
             plan_key = "reverse" if plan_key == "forward" else "forward"
 
         if finished_once:
@@ -1596,6 +1612,10 @@ class LocationService:
             "remaining_km": round(self._route_remaining / 1000, 3),
             "eta_seconds": int(round(max(0.0, self._route_eta))),
             "holding": self._route_holding,
+            "hold_kind": self._route_hold_kind if self._route_holding else None,
+            "next_hold_kind": self._route_next_hold_kind,
+            "next_hold_m": (round(self._route_next_hold_m, 1)
+                            if self._route_next_hold_m is not None else None),
             "adaptive": bool(self._route_speeds),
             "posted_limit_kmh": (
                 round(self._route_posted_limit_kmh, 2)

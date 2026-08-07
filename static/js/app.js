@@ -1239,6 +1239,49 @@ let roamWalkState = null;
 let roamChunkSpeeds = null;
 let roamChunkHolds = null;
 let roamRecoveryInProgress = false;
+// The next chunk, fetched while the current one is still driving so the seam
+// between them has no stop-and-wait. Cleared on stop and once consumed.
+let roamPrefetch = null;
+let roamPrefetching = false;
+
+function roamChunkRequest(fromLocation, useWalkState) {
+    const speed = routeSpeedKmh();
+    // Realistic ignores a low flat-speed slider, so size the chunk by a typical
+    // local limit. Long chunks (~30 min) mean the (prefetched) seam is rare; the
+    // map only ever shows a short lookahead, so chunk length is invisible.
+    const chunkSpeed = adaptiveSpeed ? Math.max(speed, 48) : speed;
+    const targetKm = Math.max(3, chunkSpeed * 0.5);
+    const request = { lat: roamCentre.lat, lon: roamCentre.lon,
+                      radius: roamRadiusMetres(), target_km: targetKm };
+    if (fromLocation && Number.isFinite(fromLocation.lat) && Number.isFinite(fromLocation.lon)) {
+        request.from_lat = fromLocation.lat;
+        request.from_lon = fromLocation.lon;
+    }
+    if (useWalkState && roamWalkState) request.walk_state = roamWalkState;
+    return request;
+}
+
+async function fetchRoamChunkData(fromLocation, useWalkState) {
+    const response = await fetch("/api/roam/route", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(roamChunkRequest(fromLocation, useWalkState))
+    });
+    const data = await response.json();
+    return response.ok ? { data } : { error: data.error || "Could not find roads there" };
+}
+
+// While the current chunk is well underway, quietly fetch the next one from
+// where this chunk ends, so continueRoaming can start it instantly.
+function prefetchNextRoamChunk() {
+    if (!roamActive || roamPrefetch || roamPrefetching || !roamChunkCoords) return;
+    const end = roamChunkCoords[roamChunkCoords.length - 1];
+    if (!end) return;
+    roamPrefetching = true;
+    fetchRoamChunkData({ lat: end[1], lon: end[0] }, true)
+        .then(result => { if (roamActive && result && result.data) roamPrefetch = result.data; })
+        .catch(() => {})
+        .finally(() => { roamPrefetching = false; });
+}
 
 const METRES_PER_MILE = 1609.344;
 
@@ -1312,7 +1355,7 @@ function updateRoamUI() {
     $("roam-unit-toggle").textContent = roamUnitMiles !== false ? "mi" : "km";
 }
 
-async function startRoaming(silent = false, fromLocation = null) {
+async function startRoaming(silent = false, fromLocation = null, prefetchedData = null) {
     // A placed dot stands in for a centre that was never explicitly picked.
     if (!silent) adoptDotAsRoamCentre();
     const radius = roamRadiusMetres();
@@ -1320,27 +1363,16 @@ async function startRoaming(silent = false, fromLocation = null) {
     const speed = routeSpeedKmh();
     const button = $("btn-roam-start");
     button.disabled = true;
-    if (!silent) roamWalkState = null;
+    if (!silent) { roamWalkState = null; roamPrefetch = null; }
     if (!silent) toast("Finding roads to roam…");
 
     try {
-        // Roughly two-minute chunks make continuation observable and keep the
-        // hidden plan small. Realistic ignores a low flat-speed slider, so use
-        // a typical local limit to size its chunk.
-        const chunkSpeed = adaptiveSpeed ? Math.max(speed, 48) : speed;
-        const targetKm = Math.max(0.5, (chunkSpeed * 0.035));
-        const routeRequest = { lat: roamCentre.lat, lon: roamCentre.lon, radius, target_km: targetKm };
-        if (fromLocation && Number.isFinite(fromLocation.lat) && Number.isFinite(fromLocation.lon)) {
-            routeRequest.from_lat = fromLocation.lat;
-            routeRequest.from_lon = fromLocation.lon;
+        let data = prefetchedData;
+        if (!data) {
+            const result = await fetchRoamChunkData(fromLocation, silent);
+            if (result.error) { return failRoam(silent, result.error); }
+            data = result.data;
         }
-        if (silent && roamWalkState) routeRequest.walk_state = roamWalkState;
-        const r = await fetch("/api/roam/route", {
-            method: "POST", headers: { "Content-Type": "application/json" },
-            body: JSON.stringify(routeRequest)
-        });
-        const data = await r.json();
-        if (!r.ok) { return failRoam(silent, data.error || "Could not find roads there"); }
 
         const startRequest = {
             waypoints: data.waypoints, speed, mode: "once",
@@ -1532,6 +1564,14 @@ function updateRoamLookahead(lat, lon) {
 // going without repeating the same loop.
 async function continueRoaming() {
     if (!roamActive) return;
+    // The next chunk was prefetched from this chunk's end while it was still
+    // driving, so start it straight away — no stop-and-wait at the seam.
+    if (roamPrefetch) {
+        const prefetched = roamPrefetch;
+        roamPrefetch = null;
+        await startRoaming(true, null, prefetched);
+        return;
+    }
     let fromLocation = null;
     try {
         // The tracking poll stops with the completed route, so its cached
@@ -1558,6 +1598,8 @@ async function stopRoaming() {
     roamWalkState = null;
     roamChunkSpeeds = null;
     roamChunkHolds = null;
+    roamPrefetch = null;
+    roamPrefetching = false;
     roamRecoveryInProgress = false;
     updateRoamUI();
     stopMovementTracking();
@@ -1871,39 +1913,77 @@ function drawTravelled(pct) {
     routeTraveledLine = L.polyline(path, { color: "#EAF2EC", weight: 4, opacity: 0.9 }).addTo(map);
 }
 
-function renderRouteSpeedStatus(data, targetOverride = null) {
+// A short rolling history of driven speed (km/h) so the readout can tell that
+// the car is speeding up or easing off, not just its instantaneous number.
+let narrationSpeeds = [];
+
+// The car's "brain": a plain-language description of what it is doing right now.
+function describeDriving(data, targetOverride) {
+    const unit = speedUnitOrDefault() === "mph" ? "mph" : "km/h";
+    const currentSpeed = finiteNumber(data.speed_kmh);
+
+    // Legacy server without the richer fields: keep the old compact readout.
+    if (currentSpeed != null && finiteNumber(data.target_speed_kmh) == null
+            && typeof data.holding !== "boolean" && typeof data.adaptive !== "boolean") {
+        return formatSpeed(currentSpeed);
+    }
+
+    if (data.holding === true) {
+        narrationSpeeds = [];
+        if (data.hold_kind === "signal") return "Waiting at the light";
+        if (data.hold_kind === "stop") return "Stopped at a stop sign";
+        if (data.hold_kind === "waypoint") return "Paused at a stop";
+        return "Stopped";
+    }
+    if (currentSpeed == null) return null;
+
+    // Whole numbers read like a person narrating ("going 30 in a 25"), not a
+    // speedometer, so round for the phrase.
+    const mph = kmh => Math.round(displaySpeedFromKmh(kmh));
+    const curDisp = mph(currentSpeed);
+    const older = narrationSpeeds.length ? narrationSpeeds[0] : currentSpeed;
+    const delta = currentSpeed - older;               // km/h over the window
+    const rising = delta > 2.5;
+    const falling = delta < -2.5;
+
+    const nextKind = data.next_hold_kind;
+    const nextM = finiteNumber(data.next_hold_m);
+    if (falling && nextKind && nextM != null && nextM < 90) {
+        if (nextKind === "signal") return "Slowing for the light";
+        if (nextKind === "stop") return "Slowing for a stop sign";
+        return "Slowing to stop";
+    }
+    if (currentSpeed < 3) return "Pulling away";
+    if (rising) return "Speeding up · " + curDisp + " " + unit;
+    if (falling) return "Easing off · " + curDisp + " " + unit;
+
+    // Cruising. Under adaptive, frame it against the posted limit ("30 in a 25").
+    const routeAdaptive = typeof data.adaptive === "boolean" ? data.adaptive : adaptiveSpeed;
+    const postedKmh = finiteNumber(data.posted_limit_kmh);
+    if (routeAdaptive && postedKmh != null && postedKmh > 0) {
+        return "Cruising · " + curDisp + " in a " + mph(postedKmh);
+    }
+    const override = finiteNumber(targetOverride);
+    const targetSpeed = override == null ? finiteNumber(data.target_speed_kmh) : override;
+    if (!routeAdaptive && targetSpeed != null) {
+        return "Cruising · " + curDisp + " / " + mph(targetSpeed) + " " + unit;
+    }
+    return "Cruising · " + curDisp + " " + unit;
+}
+
+function renderRouteSpeedStatus(data, targetOverride = null, fresh = false) {
     const statusSpeed = $("status-speed-text");
     if (!statusSpeed) return;
-    const currentSpeed = finiteNumber(data.speed_kmh);
-    const reportedTarget = finiteNumber(data.target_speed_kmh);
-    const override = finiteNumber(targetOverride);
-    const targetSpeed = override == null ? reportedTarget : override;
-    const routeAdaptive = typeof data.adaptive === "boolean" ? data.adaptive : adaptiveSpeed;
-    // Keep the HUD compact so the centred bar stays inside the gap between the
-    // panels: current/target as "34 / 60 mph", or "Stopped" at a hold. The
-    // wordy "Current … · Target …" form grew the bar into the map controls.
-    const unit = speedUnitOrDefault() === "mph" ? "mph" : "km/h";
-    if (currentSpeed != null) {
-        // Older servers have only speed_kmh — no target/holding/adaptive fields.
-        if (targetSpeed == null && typeof data.holding !== "boolean" && typeof data.adaptive !== "boolean") {
-            statusSpeed.textContent = formatSpeed(currentSpeed);
-            return;
+    // Sample the trend only from a real status poll, not from a slider redraw.
+    if (fresh && data.holding !== true) {
+        const value = finiteNumber(data.speed_kmh);
+        if (value != null) {
+            narrationSpeeds.push(value);
+            if (narrationSpeeds.length > 4) narrationSpeeds.shift();
         }
-        if (data.holding === true) {
-            statusSpeed.textContent = "Stopped";
-        } else if (routeAdaptive) {
-            // Adaptive follows the posted limit, so the slider is not the pace —
-            // show the live speed alone rather than a misleading "45 / 9".
-            statusSpeed.textContent = formatSpeed(currentSpeed) + " · adaptive";
-        } else if (targetSpeed != null) {
-            statusSpeed.textContent = displaySpeedFromKmh(currentSpeed) + " / "
-                + displaySpeedFromKmh(targetSpeed) + " " + unit;
-        } else {
-            statusSpeed.textContent = formatSpeed(currentSpeed);
-        }
-    } else if (data.holding === true) {
-        statusSpeed.textContent = "Stopped";
     }
+    const phrase = describeDriving(data, targetOverride);
+    if (phrase != null) statusSpeed.textContent = phrase;
 }
 
 async function pollRoute() {
@@ -1917,7 +1997,10 @@ async function pollRoute() {
     const progress = progressValue == null ? 0 : Math.max(0, Math.min(100, progressValue));
     $("progress-bar").style.width = progress + "%"; $("route-pct").textContent = Math.round(progress) + "%";
     drawTravelled(progress);
-    renderRouteSpeedStatus(d);
+    renderRouteSpeedStatus(d, null, true);
+    // Line up the next roam chunk once this one is well underway, so the seam
+    // between them is seamless rather than a stop-and-wait.
+    if (roamActive && d.active && progress > 55) prefetchNextRoamChunk();
     if ($("status-route")) {
         $("status-route").classList.remove("hidden");
         const remainingValue = finiteNumber(d.remaining_km);
@@ -1957,7 +2040,7 @@ async function pollRoute() {
     } catch (e) {}
 }
 
-function endRoute() { clearInterval(routePolling); routePolling = null; lastRouteStatus = null; $("btn-route-start").disabled = false; $("btn-route-stop").disabled = true; $("btn-route-pause").classList.add("hidden"); $("btn-route-resume").classList.add("hidden"); $("route-progress").classList.add("hidden"); if ($("status-route")) $("status-route").classList.add("hidden"); if (routeTraveledLine) { map.removeLayer(routeTraveledLine); routeTraveledLine = null; } stopMovementTracking(); updateStatusBar(); }
+function endRoute() { clearInterval(routePolling); routePolling = null; lastRouteStatus = null; narrationSpeeds = []; $("btn-route-start").disabled = false; $("btn-route-stop").disabled = true; $("btn-route-pause").classList.add("hidden"); $("btn-route-resume").classList.add("hidden"); $("route-progress").classList.add("hidden"); if ($("status-route")) $("status-route").classList.add("hidden"); if (routeTraveledLine) { map.removeLayer(routeTraveledLine); routeTraveledLine = null; } stopMovementTracking(); updateStatusBar(); }
 
 // ── Live tracking ───────────────────────────────────────────
 function startMovementTracking() { if (movementPolling) return; movementPolling = setInterval(pollPosition, 500); }
