@@ -81,7 +81,7 @@ def start_backend():
     app.run(host="127.0.0.1", port=PORT, debug=False, use_reloader=False)
 
 
-def wait_for_server(port, timeout=30):
+def wait_for_server(port, timeout=90):
     """Block until Flask is accepting connections."""
     for _ in range(timeout * 2):
         try:

@@ -43,6 +43,10 @@ EMIT_FALLBACK_HZ = 5.0
 EMIT_MIN_MOVEMENT_M = 0.02
 EMIT_WRITE_P99_LIMIT_S = 0.080
 EMIT_LOSS_LIMIT = 0.01
+# A slow DVT write must make the route late, not make the next fix catch up by
+# several seconds in one visible leap. At the fastest normal road profile this
+# caps a recovery step at roughly 22 m before the small GPS-noise component.
+MAX_ROUTE_ADVANCE_S = 0.75
 DRIVEN_PATH_SPACING_M = 5.0
 MAX_DRIVEN_PATH_POINTS = 25000
 
@@ -108,6 +112,7 @@ class LocationService:
         self._route_speed_current = 0
         self._route_speeds = None
         self._route_over_limit_kmh = 0.0
+        self._route_posted_limit_kmh = None
         self._route_holds = []
         self._route_holding = False
         self._route_hold_remaining = 0
@@ -473,6 +478,7 @@ class LocationService:
                     random.uniform(OVER_LIMIT_MIN_MPH, OVER_LIMIT_MAX_MPH) * MPH_TO_KMH
                     if profile else 0.0
                 )
+                self._route_posted_limit_kmh = profile[0] if profile else None
                 self._route_holds = normalized_holds
                 self._route_error = None
                 self._route_mode = mode
@@ -1410,7 +1416,7 @@ class LocationService:
                 continue
             now = time.monotonic()
             self._route_emit_deadlines += 1
-            wall_elapsed = max(0.0, now - last_wall)
+            wall_elapsed = min(MAX_ROUTE_ADVANCE_S, max(0.0, now - last_wall))
             last_wall = now
             if self._speed_randomize:
                 self._route_speed_factor += (
@@ -1447,6 +1453,13 @@ class LocationService:
             state = self._plan_state_at_time(plan, elapsed)
             if reached_hold:
                 state["speed"] = 0.0
+            if self._route_speeds and plan["segment_caps"]:
+                segment_index = min(state["segment"], len(plan["segment_caps"]) - 1)
+                self._route_posted_limit_kmh = max(
+                    0.0,
+                    plan["segment_caps"][segment_index] * 3.6
+                    - self._route_over_limit_kmh,
+                )
             actual_speed = min(state["ceiling"], state["speed"] * factor)
             self._route_speed_current = max(0.0, actual_speed * 3.6)
             at_end = elapsed >= plan["movement_duration"]
@@ -1574,6 +1587,18 @@ class LocationService:
             "eta_seconds": int(round(max(0.0, self._route_eta))),
             "holding": self._route_holding,
             "adaptive": bool(self._route_speeds),
+            "posted_limit_kmh": (
+                round(self._route_posted_limit_kmh, 2)
+                if self._route_posted_limit_kmh is not None else None
+            ),
+            "over_limit_mph": (
+                round(self._route_over_limit_kmh / MPH_TO_KMH, 2)
+                if self._route_speeds else None
+            ),
+            "cruise_target_kmh": (
+                round(self._route_posted_limit_kmh + self._route_over_limit_kmh, 2)
+                if self._route_posted_limit_kmh is not None else None
+            ),
             "emit_hz": round(self._route_emit_hz, 2),
             "error": self._route_error,
             "mode": self._route_mode,

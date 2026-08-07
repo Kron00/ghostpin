@@ -254,7 +254,10 @@ document.addEventListener("DOMContentLoaded", async () => {
     });
 
     $("btn-roam-center").addEventListener("click", () => setMapPick("roam"));
-    $("btn-roam-start").addEventListener("click", startRoaming);
+    // Do not pass the click event into startRoaming's `silent` parameter. A
+    // MouseEvent is truthy, which made a normal first start skip close-follow,
+    // the initial toast, and continuation-state reset as if it were a seam.
+    $("btn-roam-start").addEventListener("click", () => startRoaming());
     $("btn-roam-stop").addEventListener("click", stopRoaming);
     $("roam-radius").addEventListener("input", () => syncRoamRadius("field"));
     $("roam-unit-toggle").addEventListener("click", () => {
@@ -1232,11 +1235,15 @@ let roamUnitMiles = localStorage.getItem("roam_unit") === "mi" ? true
                   : (localStorage.getItem("roam_unit") === "km" ? false : null);
 let roamActive = false;
 let roamRetryTimer = null;
+let roamWalkState = null;
+let roamChunkSpeeds = null;
+let roamChunkHolds = null;
+let roamRecoveryInProgress = false;
 
 const METRES_PER_MILE = 1609.344;
 
 // Roam is meant to run until the user clicks Stop. A hiccup while stitching the
-// next tour — a network blip, or a random scatter that finds no roads — must not
+// next chunk — a network blip or a temporarily unavailable graph — must not
 // end it: keep roaming alive and retry shortly. Only a failure on the very first
 // tour (the user is watching and can adjust) or an explicit Stop ends it.
 function failRoam(silent, message) {
@@ -1313,17 +1320,21 @@ async function startRoaming(silent = false, fromLocation = null) {
     const speed = routeSpeedKmh();
     const button = $("btn-roam-start");
     button.disabled = true;
+    if (!silent) roamWalkState = null;
     if (!silent) toast("Finding roads to roam…");
 
     try {
-        // A short chunk (~10 minutes of driving): the walk is generated as it
-        // goes, so the map never shows a giant pre-planned tour.
-        const targetKm = Math.max(1, (speed * 0.15));
+        // Roughly two-minute chunks make continuation observable and keep the
+        // hidden plan small. Realistic ignores a low flat-speed slider, so use
+        // a typical local limit to size its chunk.
+        const chunkSpeed = adaptiveSpeed ? Math.max(speed, 48) : speed;
+        const targetKm = Math.max(0.5, (chunkSpeed * 0.035));
         const routeRequest = { lat: roamCentre.lat, lon: roamCentre.lon, radius, target_km: targetKm };
         if (fromLocation && Number.isFinite(fromLocation.lat) && Number.isFinite(fromLocation.lon)) {
             routeRequest.from_lat = fromLocation.lat;
             routeRequest.from_lon = fromLocation.lon;
         }
+        if (silent && roamWalkState) routeRequest.walk_state = roamWalkState;
         const r = await fetch("/api/roam/route", {
             method: "POST", headers: { "Content-Type": "application/json" },
             body: JSON.stringify(routeRequest)
@@ -1349,6 +1360,9 @@ async function startRoaming(silent = false, fromLocation = null) {
         const started = await start.json();
         if (!start.ok) { return failRoam(silent, started.error || "Could not start roaming"); }
 
+        roamWalkState = data.walk_state || null;
+        roamChunkSpeeds = Array.isArray(data.speeds) ? data.speeds : null;
+        roamChunkHolds = Array.isArray(data.holds) ? data.holds : [];
         roamActive = true;
         updateRoamUI();
         drawRoamPath(data.coordinates);
@@ -1381,6 +1395,109 @@ function drawRoamPath(coordinates) {
     roamChunkIdx = 0;
     if (roamPathLine) { map.removeLayer(roamPathLine); roamPathLine = null; }
     if (coordinates?.length) updateRoamLookahead(coordinates[0][1], coordinates[0][0]);
+}
+
+function remainingRoamChunk(fromLocation) {
+    const coords = roamChunkCoords;
+    if (!coords?.length || !fromLocation) return null;
+    const scale = Math.cos(fromLocation.lat * Math.PI / 180) * 111320;
+    const distance = (point) => Math.hypot(
+        (point[1] - fromLocation.lat) * 111320,
+        (point[0] - fromLocation.lon) * scale
+    );
+    let best = Math.max(0, Math.min(roamChunkIdx, coords.length - 1));
+    let bestDistance = distance(coords[best]);
+    // The last position poll normally leaves roamChunkIdx exact. Search around
+    // it for a write that landed between geometry points, but never scan far
+    // enough backward to match an earlier lap of a small loop.
+    const start = Math.max(0, best - 10);
+    const end = Math.min(coords.length, best + 250);
+    for (let index = start; index < end; index++) {
+        const candidateDistance = distance(coords[index]);
+        if (candidateDistance < bestDistance) {
+            best = index;
+            bestDistance = candidateDistance;
+        }
+    }
+
+    const coordinates = [[fromLocation.lon, fromLocation.lat], ...coords.slice(best + 1)];
+    if (coordinates.length < 2) return null;
+    const speeds = Array.isArray(roamChunkSpeeds)
+        && roamChunkSpeeds.length === coords.length - 1
+        ? roamChunkSpeeds.slice(best) : null;
+    const holds = Array.isArray(roamChunkHolds) ? roamChunkHolds
+        .filter((hold) => Array.isArray(hold) && hold[0] > best)
+        .map((hold) => [hold[0] - best, hold[1]]) : [];
+    return { coordinates, speeds, holds };
+}
+
+async function recoverRoamingAfterDeviceError(message) {
+    if (!roamActive || roamRecoveryInProgress) return;
+    roamRecoveryInProgress = true;
+    clearTimeout(roamRetryTimer);
+    updateRoamUI();
+    toast(message + " Reconnecting…", "error");
+    try {
+        const reconnect = await fetch("/api/device/connect", {
+            method: "POST", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ wifi: currentDeviceInfo?.connection_type === "WiFi" })
+        });
+        if (!reconnect.ok) throw new Error("Device reconnect failed");
+        if (!roamActive) return;
+
+        const fromLocation = activeSpoofLocation
+            && Number.isFinite(activeSpoofLocation.lat)
+            && Number.isFinite(activeSpoofLocation.lon)
+            ? { lat: activeSpoofLocation.lat, lon: activeSpoofLocation.lon }
+            : null;
+        const remaining = remainingRoamChunk(fromLocation);
+        if (!remaining) {
+            roamRecoveryInProgress = false;
+            await continueRoaming();
+            return;
+        }
+
+        const speed = routeSpeedKmh();
+        const startRequest = {
+            waypoints: [
+                { lat: remaining.coordinates[0][1], lng: remaining.coordinates[0][0] },
+                { lat: remaining.coordinates.at(-1)[1], lng: remaining.coordinates.at(-1)[0] },
+            ],
+            speed, mode: "once", randomize_speed: $("speed-randomize").checked,
+            coordinates: remaining.coordinates, provider: "roam", adaptive: adaptiveSpeed
+        };
+        if (adaptiveSpeed && remaining.speeds?.length) {
+            startRequest.speeds = remaining.speeds;
+            startRequest.holds = remaining.holds;
+        }
+        const startedResponse = await fetch("/api/route/start", {
+            method: "POST", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(startRequest)
+        });
+        const started = await startedResponse.json().catch(() => ({}));
+        if (!startedResponse.ok) throw new Error(started.error || "Could not resume roaming");
+        if (!roamActive) {
+            await fetch("/api/route/stop", { method: "POST" });
+            return;
+        }
+
+        roamChunkSpeeds = remaining.speeds;
+        roamChunkHolds = remaining.holds;
+        drawRoamPath(remaining.coordinates);
+        clearInterval(routePolling);
+        routePolling = setInterval(pollRoute, 1000);
+        startMovementTracking();
+        pollDevice();
+        toast("iPhone reconnected — roaming resumed");
+    } catch (e) {
+        if (roamActive) {
+            roamRetryTimer = setTimeout(
+                () => recoverRoamingAfterDeviceError(message), 3000
+            );
+        }
+    } finally {
+        roamRecoveryInProgress = false;
+    }
 }
 
 function updateRoamLookahead(lat, lon) {
@@ -1438,6 +1555,10 @@ async function stopRoaming() {
     try { await fetch("/api/wander/stop", { method: "POST" }); } catch (e) { /* legacy */ }
     if (roamPathLine) { map.removeLayer(roamPathLine); roamPathLine = null; }
     roamChunkCoords = null;
+    roamWalkState = null;
+    roamChunkSpeeds = null;
+    roamChunkHolds = null;
+    roamRecoveryInProgress = false;
     updateRoamUI();
     stopMovementTracking();
     toast("Roaming stopped");
@@ -1786,7 +1907,11 @@ function renderRouteSpeedStatus(data, targetOverride = null) {
 }
 
 async function pollRoute() {
-    try { const r = await fetch("/api/route/status"); if (!r.ok) { endRoute(); return; } const d = await r.json();
+    try { const r = await fetch("/api/route/status"); if (!r.ok) {
+        endRoute();
+        if (roamActive) recoverRoamingAfterDeviceError("Route status unavailable.");
+        return;
+    } const d = await r.json();
     lastRouteStatus = d;
     const progressValue = finiteNumber(d.progress_pct);
     const progress = progressValue == null ? 0 : Math.max(0, Math.min(100, progressValue));
@@ -1816,9 +1941,12 @@ async function pollRoute() {
     if (!d.active) {
         endRoute();
         if (d.error) {
-            // The device stopped answering — do not quietly lay out more road.
-            roamActive = false;
-            if (typeof updateRoamUI === "function") updateRoamUI();
+            // Roam is user-stopped, not transport-stopped. Reconnect and resume
+            // this exact graph-walk chunk rather than ending it or jumping.
+            if (roamActive) {
+                recoverRoamingAfterDeviceError(d.error);
+                return;
+            }
             pollDevice();
             return toast(d.error, "error");
         }

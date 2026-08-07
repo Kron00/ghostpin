@@ -1030,35 +1030,6 @@ def _google_multi_stop_route(stops):
 # walk over the actual road graph inside the area, which the ordinary route
 # runner can then drive.
 
-_ROAM_HIGHWAYS = (
-    "residential|living_street|tertiary|tertiary_link|secondary|secondary_link|"
-    "primary|primary_link|unclassified|road|service"
-)
-
-
-def _trim_backtracks(coordinates):
-    """Collapse out-and-back spurs: drive in, touch the waypoint, retrace out.
-
-    A scattered destination often lands inside a dead-end pocket, so the tour
-    grows a long tendril up a road and straight back down it. The retrace
-    reuses the same OSM nodes, so walking the path with a stack and cancelling
-    any step that returns to the point before last removes the whole spur while
-    leaving genuine loops (which never immediately retrace an edge) alone.
-    """
-    def same(a, b):
-        return abs(a[0] - b[0]) < 1e-6 and abs(a[1] - b[1]) < 1e-6
-
-    out = []
-    for point in coordinates:
-        if out and same(out[-1], point):
-            continue
-        if len(out) >= 2 and same(out[-2], point):
-            out.pop()
-        else:
-            out.append(point)
-    return out
-
-
 # ── Roam as a random walk on the road graph ───────────────────
 # Roam used to pre-calculate a whole tour through scattered waypoints, which
 # drew a giant route on the map and inherited OSRM's dead-end detours. Instead,
@@ -1070,6 +1041,45 @@ def _trim_backtracks(coordinates):
 _ROAM_GRAPH_CACHE = {}
 _ROAM_GRAPH_CACHE_MAX = 4
 _ROAM_RECENT_EDGES = 12
+_ROAM_RECENT_NODES = 12
+_ROAM_MIN_TURN_DEG = 45.0
+_ROAM_HEADING_DISTANCE_M = 20.0
+
+
+def _roam_way_direction(tags):
+    """Return allowed OSM-way directions as ``(forward, backward)``.
+
+    OSM defines ``oneway`` relative to the stored node order.  Explicit motor
+    vehicle overrides take precedence, while roundabouts and motorways carry
+    the documented implicit forward-only direction.  A time-dependent or
+    unknown restriction is skipped: guessing bidirectional there could put the
+    simulated car against traffic.
+    """
+    tags = tags or {}
+    if any(key in tags for key in (
+            "oneway:conditional", "oneway:motor_vehicle:conditional",
+            "oneway:motorcar:conditional")):
+        return None
+
+    raw = tags.get("oneway:motorcar")
+    if raw is None:
+        raw = tags.get("oneway:motor_vehicle")
+    if raw is None:
+        raw = tags.get("oneway")
+
+    if raw is not None:
+        value = str(raw).strip().lower()
+        if value in ("yes", "true", "1"):
+            return True, False
+        if value in ("-1", "reverse"):
+            return False, True
+        if value in ("no", "false", "0"):
+            return True, True
+        return None
+
+    if tags.get("junction") == "roundabout" or tags.get("highway") == "motorway":
+        return True, False
+    return True, True
 
 
 def _fetch_road_graph(lat, lon, radius_m):
@@ -1109,11 +1119,13 @@ def _fetch_road_graph(lat, lon, radius_m):
             tags = element.get("tags") or {}
             speed = _parse_maxspeed(tags.get("maxspeed")) or \
                 _CLASS_DEFAULT_KMH.get(tags.get("highway"))
+            direction = _roam_way_direction(tags)
             node_ids = element.get("nodes") or []
             geometry = element.get("geometry") or []
-            if not speed or len(node_ids) != len(geometry) or len(node_ids) < 2:
+            if (not speed or direction is None
+                    or len(node_ids) != len(geometry) or len(node_ids) < 2):
                 continue
-            ways.append((node_ids, geometry, speed))
+            ways.append((node_ids, geometry, speed, direction))
             for node_id in node_ids:
                 node_uses[node_id] = node_uses.get(node_id, 0) + 1
         elif element.get("type") == "node":
@@ -1127,7 +1139,7 @@ def _fetch_road_graph(lat, lon, radius_m):
     # leaving the area become stubs that the dead-end pruning removes.
     edges = []
     adjacency = {}
-    for node_ids, geometry, speed in ways:
+    for node_ids, geometry, speed, direction in ways:
         cut = [0]
         for index in range(1, len(node_ids) - 1):
             if node_uses[node_ids[index]] > 1:
@@ -1144,6 +1156,7 @@ def _fetch_road_graph(lat, lon, radius_m):
             edges.append({
                 "a": seg_ids[0], "b": seg_ids[-1],
                 "ids": seg_ids, "points": seg_pts, "speed": speed,
+                "forward": direction[0], "backward": direction[1],
             })
             adjacency.setdefault(seg_ids[0], set()).add(edge_id)
             adjacency.setdefault(seg_ids[-1], set()).add(edge_id)
@@ -1166,22 +1179,283 @@ def _fetch_road_graph(lat, lon, radius_m):
         if len(adjacency[other]) == 1:
             queue.append(other)
 
-    live_adjacency = {n: e for n, e in adjacency.items() if e}
-    if not live_adjacency:
+    def outward_vector(node, edge_id):
+        """Metre vector pointing away from a junction along an incident edge."""
+        edge = edges[edge_id]
+        points = edge["points"] if edge["a"] == node else list(reversed(edge["points"]))
+        origin = points[0]
+        for point in points[1:]:
+            dy = (point[1] - origin[1]) * 111320.0
+            dx = ((point[0] - origin[0]) * 111320.0
+                  * math.cos(math.radians(origin[1])))
+            if math.hypot(dx, dy) >= _ROAM_HEADING_DISTANCE_M:
+                return dx, dy
+        point = points[-1]
+        return (
+            (point[0] - origin[0]) * 111320.0 * math.cos(math.radians(origin[1])),
+            (point[1] - origin[1]) * 111320.0,
+        )
+
+    def angle_degrees(first, second):
+        denominator = math.hypot(*first) * math.hypot(*second)
+        if denominator <= 0:
+            return 180.0
+        cosine = max(-1.0, min(1.0,
+            (first[0] * second[0] + first[1] * second[1]) / denominator))
+        return math.degrees(math.acos(cosine))
+
+    # Some OSM junctions use two distinct edge IDs for roads that both leave
+    # the node along the same ray (a ramp/freeway nose is a common example).
+    # Topologically that is degree two, but visually driving in on one and out
+    # on the other is a U-turn over the same corridor. Remove these geometric
+    # dead ends, then repeat ordinary leaf pruning after each batch.
+    while True:
+        cusps = set()
+        for node, edge_ids in adjacency.items():
+            live = [edge_id for edge_id in edge_ids if edge_id not in removed]
+            vectors = {
+                edge_id: outward_vector(node, edge_id) for edge_id in live
+            }
+            for edge_id in live:
+                if not any(
+                    other != edge_id
+                    and angle_degrees(vectors[edge_id], vectors[other])
+                        >= _ROAM_MIN_TURN_DEG
+                    for other in live
+                ):
+                    cusps.add(edge_id)
+        if not cusps:
+            break
+        removed.update(cusps)
+        for edge_id in cusps:
+            edge = edges[edge_id]
+            adjacency[edge["a"]].discard(edge_id)
+            adjacency[edge["b"]].discard(edge_id)
+        queue = [node for node, edge_ids in adjacency.items()
+                 if len([edge_id for edge_id in edge_ids if edge_id not in removed]) == 1]
+        while queue:
+            node = queue.pop()
+            live = [edge_id for edge_id in adjacency.get(node, ())
+                    if edge_id not in removed]
+            if len(live) != 1:
+                continue
+            edge_id = live[0]
+            removed.add(edge_id)
+            edge = edges[edge_id]
+            other = edge["b"] if edge["a"] == node else edge["a"]
+            adjacency[node].discard(edge_id)
+            adjacency[other].discard(edge_id)
+            if len([candidate for candidate in adjacency[other]
+                    if candidate not in removed]) == 1:
+                queue.append(other)
+
+    # Leaf pruning alone leaves a second kind of tendril: a cyclic pocket joined
+    # to the useful network by one bridge road. A walk can circle the pocket,
+    # but its only exit is still the road it entered on. Remove graph bridges,
+    # then keep the largest remaining cyclic road component so Roam cannot enter
+    # a topological cul-de-sac or get trapped repeating a tiny isolated loop.
+    discovery = {}
+    low = {}
+    bridges = set()
+    clock = 0
+    parent_node = {}
+    parent_edge = {}
+
+    # Iterative Tarjan bridge search. A five-mile suburban graph can contain
+    # thousands of junctions; recursive DFS overflows Python's call stack and
+    # turned an otherwise valid Roam request into an HTTP 500.
+    for root in adjacency:
+        if root in discovery or not any(
+                edge_id not in removed for edge_id in adjacency[root]):
+            continue
+        clock += 1
+        discovery[root] = low[root] = clock
+        parent_node[root] = None
+        parent_edge[root] = None
+        stack = [(root, iter(adjacency.get(root, ())))]
+        while stack:
+            node, edge_iterator = stack[-1]
+            try:
+                edge_id = next(edge_iterator)
+            except StopIteration:
+                stack.pop()
+                edge_to_parent = parent_edge[node]
+                parent = parent_node[node]
+                if edge_to_parent is not None:
+                    low[parent] = min(low[parent], low[node])
+                    if low[node] > discovery[parent]:
+                        bridges.add(edge_to_parent)
+                continue
+            if edge_id in removed or edge_id == parent_edge[node]:
+                continue
+            edge = edges[edge_id]
+            other = edge["b"] if edge["a"] == node else edge["a"]
+            if other not in discovery:
+                parent_node[other] = node
+                parent_edge[other] = edge_id
+                clock += 1
+                discovery[other] = low[other] = clock
+                stack.append((other, iter(adjacency.get(other, ()))))
+            else:
+                low[node] = min(low[node], discovery[other])
+
+    removed.update(bridges)
+    without_bridges = {
+        node: {edge_id for edge_id in edge_ids if edge_id not in removed}
+        for node, edge_ids in adjacency.items()
+    }
+    without_bridges = {node: edge_ids for node, edge_ids in without_bridges.items()
+                       if edge_ids}
+
+    components = []
+    seen_nodes = set()
+    for first_node in without_bridges:
+        if first_node in seen_nodes:
+            continue
+        stack = [first_node]
+        component_nodes = set()
+        component_edges = set()
+        while stack:
+            node = stack.pop()
+            if node in component_nodes:
+                continue
+            component_nodes.add(node)
+            seen_nodes.add(node)
+            for edge_id in without_bridges.get(node, ()):
+                component_edges.add(edge_id)
+                edge = edges[edge_id]
+                other = edge["b"] if edge["a"] == node else edge["a"]
+                if other not in component_nodes:
+                    stack.append(other)
+        if component_edges:
+            components.append((component_edges, component_nodes))
+
+    if not components:
+        return None
+    kept_edges, kept_nodes = max(components, key=lambda component: len(component[0]))
+    topological_adjacency = {
+        node: edge_ids & kept_edges
+        for node, edge_ids in without_bridges.items()
+        if node in kept_nodes and edge_ids & kept_edges
+    }
+
+    if not topological_adjacency:
         return None
 
+    # Direction is deliberately applied after undirected leaf/bridge pruning.
+    # The topology answers "would this road form a tendril?"; these directed
+    # traversal states answer "may a car enter it from this end?".  Keep the
+    # largest strongly connected component of the non-backtracking state graph
+    # so every allowed arrival always has a legal onward road other than the
+    # physical edge just driven.  This is what lets Roam respect one-way roads
+    # without introducing a new directed dead end or out-and-back retrace.
+    directed_steps = []
+    steps_from = {}
+    for edge_id in kept_edges:
+        edge = edges[edge_id]
+        if edge["forward"]:
+            step = (edge_id, edge["a"], edge["b"])
+            directed_steps.append(step)
+            steps_from.setdefault(edge["a"], set()).add(step)
+        if edge["backward"]:
+            step = (edge_id, edge["b"], edge["a"])
+            directed_steps.append(step)
+            steps_from.setdefault(edge["b"], set()).add(step)
+
+    transitions = {
+        step: {
+            candidate for candidate in steps_from.get(step[2], ())
+            if candidate[0] != step[0]
+        }
+        for step in directed_steps
+    }
+    reverse_transitions = {step: set() for step in directed_steps}
+    for step, next_steps in transitions.items():
+        for next_step in next_steps:
+            reverse_transitions[next_step].add(step)
+
+    # Iterative Kosaraju avoids recursion limits on five-mile city graphs.
+    visited = set()
+    finish_order = []
+    for root in directed_steps:
+        if root in visited:
+            continue
+        visited.add(root)
+        stack = [(root, False)]
+        while stack:
+            step, finishing = stack.pop()
+            if finishing:
+                finish_order.append(step)
+                continue
+            stack.append((step, True))
+            for next_step in transitions[step]:
+                if next_step not in visited:
+                    visited.add(next_step)
+                    stack.append((next_step, False))
+
+    state_components = []
+    assigned = set()
+    for root in reversed(finish_order):
+        if root in assigned:
+            continue
+        component = set()
+        stack = [root]
+        assigned.add(root)
+        while stack:
+            step = stack.pop()
+            component.add(step)
+            for previous_step in reverse_transitions[step]:
+                if previous_step not in assigned:
+                    assigned.add(previous_step)
+                    stack.append(previous_step)
+        if component and all(transitions[step] & component for step in component):
+            state_components.append(component)
+
+    if not state_components:
+        return None
+    allowed_steps = max(
+        state_components,
+        key=lambda component: (len({step[0] for step in component}), len(component)),
+    )
+    live_edge_ids = {step[0] for step in allowed_steps}
+    live_nodes = {node for step in allowed_steps for node in step[1:]}
+    live_adjacency = {
+        node: {
+            edge_id for edge_id in topological_adjacency.get(node, ())
+            if edge_id in live_edge_ids
+        }
+        for node in live_nodes
+    }
+    live_adjacency = {
+        node: edge_ids for node, edge_ids in live_adjacency.items() if edge_ids
+    }
+    outgoing = {}
+    for edge_id, origin, _ in allowed_steps:
+        outgoing.setdefault(origin, set()).add(edge_id)
+
+    outward_vectors = {
+        (node, edge_id): outward_vector(node, edge_id)
+        for node, edge_ids in live_adjacency.items()
+        for edge_id in edge_ids
+    }
+
     graph = {"edges": edges, "adjacency": live_adjacency,
-             "junction_kinds": junction_kinds}
+             "outgoing": outgoing, "allowed_steps": allowed_steps,
+             "junction_kinds": junction_kinds, "cache_key": cache_key,
+             "outward_vectors": outward_vectors}
     if len(_ROAM_GRAPH_CACHE) >= _ROAM_GRAPH_CACHE_MAX:
         _ROAM_GRAPH_CACHE.pop(next(iter(_ROAM_GRAPH_CACHE)))
     _ROAM_GRAPH_CACHE[cache_key] = graph
     return graph
 
 
-def _random_walk(graph, start_lat, start_lon, target_km):
+def _random_walk(graph, start_lat, start_lon, target_km, walk_state=None):
     """Wander the graph from the nearest road: coordinates, speeds, holds."""
     edges, adjacency = graph["edges"], graph["adjacency"]
+    outgoing = graph.get("outgoing", adjacency)
+    allowed_steps = graph.get("allowed_steps")
     junction_kinds = graph["junction_kinds"]
+    outward_vectors = graph.get("outward_vectors", {})
     cos_lat = math.cos(math.radians(start_lat))
 
     def metres(a, b):
@@ -1189,24 +1463,13 @@ def _random_walk(graph, start_lat, start_lon, target_km):
         dx = (a[0] - b[0]) * 111320.0 * cos_lat
         return math.hypot(dx, dy)
 
-    # Snap to the closest vertex of any live edge.
-    start = (start_lon, start_lat)
-    best = None
-    for edge_id, edge in enumerate(edges):
-        if edge["a"] not in adjacency or edge_id not in adjacency[edge["a"]]:
-            continue
-        for index, point in enumerate(edge["points"]):
-            distance = metres(point, start)
-            if best is None or distance < best[0]:
-                best = (distance, edge_id, index)
-    if best is None:
-        return None
-    _, edge_id, index = best
-
     coordinates = []
     speeds = []
     holds = []
     recent = []
+    recent_steps = []
+    node_history = {}
+    node_history_order = []
 
     def append_leg(points, ids, speed):
         for point, node_id in zip(points, ids):
@@ -1219,16 +1482,126 @@ def _random_walk(graph, start_lat, start_lon, target_km):
             if kind:
                 holds.append([len(coordinates) - 1, kind])
 
-    # First leg: from the snapped vertex to whichever end of that edge is
-    # farther along it, so the walk starts by driving the road it is on.
-    edge = edges[edge_id]
-    if index <= len(edge["points"]) // 2:
-        points, ids, node = (list(reversed(edge["points"][:index + 1])),
-                             list(reversed(edge["ids"][:index + 1])), edge["a"])
-    else:
-        points, ids, node = (edge["points"][index:], edge["ids"][index:], edge["b"])
-    append_leg(points, ids, edge["speed"])
-    recent.append(edge_id)
+    # Continue from the exact graph node and recent-edge history returned by
+    # the previous chunk. Without this state a new chunk can mistake some other
+    # incident edge for the incoming road, randomly choose the real incoming
+    # road, and make a visible U-turn exactly at the stitch.
+    state_is_valid = False
+    if isinstance(walk_state, dict):
+        state_node = walk_state.get("node")
+        state_recent = walk_state.get("recent_edges")
+        state_steps = walk_state.get("recent_steps")
+        state_history = walk_state.get("node_history")
+        state_key = walk_state.get("graph_key")
+        if (isinstance(state_node, int) and not isinstance(state_node, bool)
+                and isinstance(state_recent, list)
+                and isinstance(state_steps, list)
+                and isinstance(state_history, list)
+                and state_key == list(graph["cache_key"])
+                and state_node in adjacency):
+            live_edges = set().union(*adjacency.values())
+            cleaned_recent = [
+                edge_id for edge_id in state_recent[-_ROAM_RECENT_EDGES:]
+                if isinstance(edge_id, int) and not isinstance(edge_id, bool)
+                and edge_id in live_edges
+            ]
+            for item in state_steps[-_ROAM_RECENT_EDGES:]:
+                if (not isinstance(item, list) or len(item) != 3
+                        or any(not isinstance(value, int) or isinstance(value, bool)
+                               for value in item)):
+                    continue
+                edge_id, origin_node, destination_node = item
+                if (edge_id not in live_edges
+                        or origin_node not in adjacency
+                        or destination_node not in adjacency):
+                    continue
+                edge = edges[edge_id]
+                if ({origin_node, destination_node} != {edge["a"], edge["b"]}
+                        or edge_id not in outgoing.get(origin_node, ())
+                        or (allowed_steps is not None
+                            and (edge_id, origin_node, destination_node)
+                            not in allowed_steps)):
+                    continue
+                recent_steps.append((edge_id, origin_node, destination_node))
+
+            # The final recent step must be a legal directed arrival at this
+            # node, not merely an incident edge ID from an older client.
+            if (cleaned_recent and recent_steps
+                    and cleaned_recent[-1] in adjacency[state_node]
+                    and recent_steps[-1][0] == cleaned_recent[-1]
+                    and recent_steps[-1][2] == state_node):
+                for item in state_history[-_ROAM_RECENT_NODES:]:
+                    if (not isinstance(item, list) or len(item) != 3
+                            or not isinstance(item[0], int)
+                            or isinstance(item[0], bool)):
+                        continue
+                    history_node, history_incoming, history_outgoing = item
+                    if (history_incoming is not None
+                            and (not isinstance(history_incoming, int)
+                                 or isinstance(history_incoming, bool)
+                                 or history_incoming not in live_edges)):
+                        continue
+                    if (not isinstance(history_outgoing, int)
+                            or isinstance(history_outgoing, bool)
+                            or history_outgoing not in live_edges
+                            or history_node not in adjacency
+                            or history_outgoing not in outgoing.get(history_node, ())):
+                        continue
+                    node_history[history_node] = (history_incoming, history_outgoing)
+                    if history_node in node_history_order:
+                        node_history_order.remove(history_node)
+                    node_history_order.append(history_node)
+                incident = edges[next(iter(adjacency[state_node]))]
+                point = (incident["points"][0] if incident["a"] == state_node
+                         else incident["points"][-1])
+                if metres(point, (start_lon, start_lat)) <= 50.0:
+                    node = state_node
+                    recent = cleaned_recent
+                    coordinates.append(list(point))
+                    state_is_valid = True
+
+    if not state_is_valid:
+        # Initial chunk: snap to the closest vertex of a legally traversable
+        # live edge. At a junction there is no incoming road yet, so let the
+        # normal random choice consider every legal departure. Mid-edge, follow
+        # only an allowed OSM-way direction to its endpoint.
+        start = (start_lon, start_lat)
+        best = None
+        for edge_id, edge in enumerate(edges):
+            origins = [
+                origin for origin in (edge["a"], edge["b"])
+                if edge_id in outgoing.get(origin, ())
+            ]
+            if not origins:
+                continue
+            for index, point in enumerate(edge["points"]):
+                distance = metres(point, start)
+                if best is None or distance < best[0]:
+                    best = (distance, edge_id, index, origins)
+        if best is None:
+            return None
+        _, edge_id, index, origins = best
+        edge = edges[edge_id]
+        if index == 0:
+            node = edge["a"]
+            coordinates.append(list(edge["points"][0]))
+        elif index == len(edge["points"]) - 1:
+            node = edge["b"]
+            coordinates.append(list(edge["points"][-1]))
+        else:
+            origin = random.choice(origins)
+            if origin == edge["a"]:
+                points, ids, node = (
+                    edge["points"][index:], edge["ids"][index:], edge["b"]
+                )
+            else:
+                points, ids, node = (
+                    list(reversed(edge["points"][:index + 1])),
+                    list(reversed(edge["ids"][:index + 1])), edge["a"]
+                )
+            append_leg(points, ids, edge["speed"])
+            recent.append(edge_id)
+            recent_steps.append((edge_id, origin, node))
 
     travelled = 0.0
     for i in range(1, len(coordinates)):
@@ -1239,13 +1612,74 @@ def _random_walk(graph, start_lat, start_lon, target_km):
     for _ in range(2000):
         if travelled >= target_m:
             break
-        options = [e for e in adjacency.get(node, ()) if e != recent[-1]]
+        incoming = recent[-1] if recent else None
+        options = [e for e in outgoing.get(node, ()) if e != incoming]
         if not options:
-            options = list(adjacency.get(node, ()))
-            if not options:
-                break
-        fresh = [e for e in options if e not in recent]
-        edge_id = random.choice(fresh or options)
+            # The directed non-backtracking core should make this impossible;
+            # never recover by reversing the physical edge just driven.
+            break
+
+        if incoming is not None and (node, incoming) in outward_vectors:
+            incoming_vector = outward_vectors[(node, incoming)]
+            non_uturn = []
+            for candidate in options:
+                candidate_vector = outward_vectors.get((node, candidate))
+                if candidate_vector is None:
+                    non_uturn.append(candidate)
+                    continue
+                denominator = math.hypot(*incoming_vector) * math.hypot(*candidate_vector)
+                if denominator <= 0:
+                    non_uturn.append(candidate)
+                    continue
+                cosine = max(-1.0, min(1.0,
+                    (incoming_vector[0] * candidate_vector[0]
+                     + incoming_vector[1] * candidate_vector[1]) / denominator))
+                if math.degrees(math.acos(cosine)) >= _ROAM_MIN_TURN_DEG:
+                    non_uturn.append(candidate)
+            if non_uturn:
+                options = non_uturn
+
+        destinations = {}
+        for candidate in options:
+            candidate_edge = edges[candidate]
+            destinations[candidate] = (
+                candidate_edge["b"] if candidate_edge["a"] == node
+                else candidate_edge["a"]
+            )
+        safe_options = [
+            candidate for candidate in options
+            if not any(
+                step_edge == candidate
+                and step_origin == destinations[candidate]
+                and step_destination == node
+                for step_edge, step_origin, step_destination in recent_steps
+            )
+        ]
+        choice_pool = safe_options or options
+        previous_turn = node_history.get(node)
+        unseen = [
+            edge_id for edge_id in choice_pool
+            if previous_turn is None or edge_id not in previous_turn
+        ]
+        fresh = [edge_id for edge_id in unseen if edge_id not in recent]
+        if fresh or unseen:
+            edge_id = random.choice(fresh or unseen)
+        elif previous_turn and previous_turn[1] in choice_pool:
+            # We have returned through a short loop and every road is recent.
+            # Repeating the prior departure leads back toward unexplored exits;
+            # choosing the prior arrival is the visible out-and-back failure.
+            edge_id = previous_turn[1]
+        else:
+            fresh = [edge_id for edge_id in options if edge_id not in recent]
+            edge_id = random.choice(fresh or options)
+        departed_node = node
+        node_history[departed_node] = (incoming, edge_id)
+        if departed_node in node_history_order:
+            node_history_order.remove(departed_node)
+        node_history_order.append(departed_node)
+        while len(node_history_order) > _ROAM_RECENT_NODES:
+            forgotten = node_history_order.pop(0)
+            node_history.pop(forgotten, None)
         edge = edges[edge_id]
         if edge["a"] == node:
             points, ids, node = edge["points"], edge["ids"], edge["b"]
@@ -1258,8 +1692,10 @@ def _random_walk(graph, start_lat, start_lon, target_km):
             travelled += metres(tuple(coordinates[i - 1]), tuple(coordinates[i]))
         recent.append(edge_id)
         recent[:] = recent[-_ROAM_RECENT_EDGES:]
+        recent_steps.append((edge_id, departed_node, node))
+        recent_steps[:] = recent_steps[-_ROAM_RECENT_EDGES:]
 
-    if len(coordinates) < 3:
+    if len(coordinates) < 2:
         return None
     return {
         "provider": "roam",
@@ -1271,104 +1707,17 @@ def _random_walk(graph, start_lat, start_lon, target_km):
             {"lat": coordinates[-1][1], "lng": coordinates[-1][0]},
         ],
         "distance_km": round(travelled / 1000, 2),
+        "walk_state": {
+            "graph_key": list(graph["cache_key"]),
+            "node": node,
+            "recent_edges": recent,
+            "recent_steps": [list(step) for step in recent_steps],
+            "node_history": [
+                [history_node, node_history[history_node][0], node_history[history_node][1]]
+                for history_node in node_history_order
+            ],
+        },
     }
-
-
-def _roam_tour(lat, lon, radius_m, spread, sectors, from_lat=None, from_lon=None):
-    """One candidate tour: a destination per sector, joined by road."""
-    offset = random.uniform(0, 2 * math.pi)
-    scattered = []
-    for index in range(sectors):
-        angle = offset + (2 * math.pi * index / sectors) + random.uniform(-0.3, 0.3)
-        distance = radius_m * spread * random.uniform(0.5, 1.0)
-        d_lat = (distance * math.cos(angle)) / 111320.0
-        d_lon = (distance * math.sin(angle)) / (111320.0 * math.cos(math.radians(lat)))
-        scattered.append((lat + d_lat, lon + d_lon))
-
-    points = list(scattered)
-    if from_lat is not None and from_lon is not None:
-        points.insert(0, (from_lat, from_lon))
-    points.append(scattered[0])
-
-    coords = ";".join(f"{plon:.6f},{plat:.6f}" for plat, plon in points)
-    url = (f"https://router.project-osrm.org/route/v1/driving/{coords}"
-           "?geometries=geojson&overview=full")
-    try:
-        response = http_requests.get(url, timeout=20)
-        response.raise_for_status()
-        data = response.json()
-    except (http_requests.RequestException, ValueError):
-        return None
-    if data.get("code") != "Ok" or not data.get("routes"):
-        return None
-
-    route = data["routes"][0]
-    geometry = route.get("geometry", {}).get("coordinates") or []
-    if len(geometry) < 3:
-        return None
-
-    # Zero-length segments buy nothing and make the runner's arithmetic noisier.
-    cleaned = [geometry[0]]
-    for point in geometry[1:]:
-        previous = cleaned[-1]
-        if abs(point[0] - previous[0]) > 1e-7 or abs(point[1] - previous[1]) > 1e-7:
-            cleaned.append(point)
-    cleaned = _trim_backtracks(cleaned)
-    if len(cleaned) < 3:
-        return None
-
-    cos_lat = math.cos(math.radians(lat))
-    worst = 0.0
-    # The caller vouches for its current position; only the new tour must fit
-    # the area drawn on the map.
-    checked = cleaned[1:] if from_lat is not None and from_lon is not None else cleaned
-    for plon, plat in checked:
-        dy = (plat - lat) * 111320.0
-        dx = (plon - lon) * 111320.0 * cos_lat
-        worst = max(worst, math.hypot(dx, dy))
-
-    # Trimming spurs shortened the path, so OSRM's own distance overstates it.
-    trimmed_m = 0.0
-    for (lon1, lat1), (lon2, lat2) in zip(cleaned, cleaned[1:]):
-        dy = (lat2 - lat1) * 111320.0
-        dx = (lon2 - lon1) * 111320.0 * cos_lat
-        trimmed_m += math.hypot(dx, dy)
-
-    return {
-        "provider": "roam",
-        "coordinates": cleaned,
-        "waypoints": [
-            {"lat": cleaned[0][1], "lng": cleaned[0][0]},
-            {"lat": cleaned[-1][1], "lng": cleaned[-1][0]},
-        ],
-        "distance_km": round(trimmed_m / 1000, 2),
-        "max_from_centre_m": round(worst),
-    }
-
-
-def _roam_route(lat, lon, radius_m, target_km, from_lat=None, from_lon=None):
-    """A road route touring the whole area, or None if it cannot be built.
-
-    A random walk from the centre hugs whichever road it starts on, so this
-    scatters a destination into every sector of the circle and lets OSRM join
-    them by road. Roads detour — around a lake, say — so the result is checked
-    against the radius and retried tighter rather than trusted: an area drawn
-    on the map that the phone then leaves by miles is a lie.
-    """
-    radius_m = max(120.0, min(float(radius_m), 50000.0))
-    sectors = max(5, min(9, int(target_km / 2) + 4))
-    allowed = radius_m * 1.08
-
-    best = None
-    for spread in (0.8, 0.62, 0.45, 0.32):
-        tour = _roam_tour(lat, lon, radius_m, spread, sectors, from_lat, from_lon)
-        if not tour:
-            continue
-        if tour["max_from_centre_m"] <= allowed:
-            return tour
-        if best is None or tour["max_from_centre_m"] < best["max_from_centre_m"]:
-            best = tour
-    return best
 
 
 @app.route("/api/roam/route", methods=["POST"])
@@ -1397,17 +1746,48 @@ def api_roam_route():
     if not _search_allowed():
         return jsonify({"error": "Too many requests, slow down"}), 429
 
-    # Wander the road graph turn by turn. The scattered-waypoint tour survives
-    # only as a fallback for when every Overpass mirror is unreachable.
-    target = max(1.0, min(target_km, 60.0))
+    walk_state = data.get("walk_state")
+    if walk_state is not None:
+        if (not isinstance(walk_state, dict)
+                or not isinstance(walk_state.get("graph_key"), list)
+                or not isinstance(walk_state.get("node"), int)
+                or isinstance(walk_state.get("node"), bool)
+                or not isinstance(walk_state.get("recent_edges"), list)
+                or len(walk_state["recent_edges"]) > _ROAM_RECENT_EDGES
+                or any(not isinstance(edge_id, int) or isinstance(edge_id, bool)
+                       for edge_id in walk_state["recent_edges"])
+                or not isinstance(walk_state.get("recent_steps"), list)
+                or len(walk_state["recent_steps"]) > _ROAM_RECENT_EDGES
+                or any(
+                    not isinstance(item, list) or len(item) != 3
+                    or any(not isinstance(value, int) or isinstance(value, bool)
+                           for value in item)
+                    for item in walk_state["recent_steps"]
+                )
+                or not isinstance(walk_state.get("node_history"), list)
+                or len(walk_state["node_history"]) > _ROAM_RECENT_NODES
+                or any(
+                    not isinstance(item, list) or len(item) != 3
+                    or not isinstance(item[0], int) or isinstance(item[0], bool)
+                    or (item[1] is not None
+                        and (not isinstance(item[1], int) or isinstance(item[1], bool)))
+                    or not isinstance(item[2], int) or isinstance(item[2], bool)
+                    for item in walk_state["node_history"]
+                )):
+            return jsonify({"error": "Roam continuation state is invalid"}), 400
+
+    # Wander the road graph turn by turn. If every Overpass mirror is down,
+    # fail this chunk so the active client retries; never substitute the old
+    # scattered-waypoint tour, which is not a random walk.
+    target = max(0.35, min(target_km, 60.0))
     graph = _fetch_road_graph(lat, lon, radius)
-    if graph:
-        walk_lat = from_lat if from_lat is not None else lat
-        walk_lon = from_lon if from_lon is not None else lon
-        route = _random_walk(graph, walk_lat, walk_lon, target)
-        if route:
-            return jsonify(route)
-    route = _roam_route(lat, lon, radius, target, from_lat, from_lon)
+    if not graph:
+        return jsonify({
+            "error": "Road graph is temporarily unavailable. Trying again shortly."
+        }), 503
+    walk_lat = from_lat if from_lat is not None else lat
+    walk_lon = from_lon if from_lon is not None else lon
+    route = _random_walk(graph, walk_lat, walk_lon, target, walk_state)
     if not route:
         return jsonify({"error": "No roads found in that area. Try a larger radius."}), 404
     return jsonify(route)
