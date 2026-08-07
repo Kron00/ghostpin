@@ -80,9 +80,12 @@ def _security_headers(response):
     return response
 
 
-# Global state — initialized by main() or main_app.py
+# Persistence is available for the lifetime of the backend, even before an
+# iPhone connects. Saved locations, history, routes, profiles, and schedules
+# are local application data and must not disappear just because device setup
+# is still in progress.
 device_mgr = None
-loc_svc = None
+loc_svc = LocationService(None, None)
 _state_lock = threading.Lock()
 _schedule_thread = None
 _schedule_active = False
@@ -101,7 +104,7 @@ def _check_ready():
     """Return error response if device/service not ready, else None."""
     if device_mgr is None:
         return jsonify({"error": "Tunnel not connected. Ensure iPhone is plugged in and restart the app."}), 503
-    if loc_svc is None:
+    if loc_svc is None or loc_svc.simulator is None or loc_svc.bridge is None:
         return jsonify({"error": "No device connected. Plug in your iPhone and restart."}), 503
     return None
 
@@ -157,7 +160,7 @@ def api_device_switch():
             loc_svc._stop_keepalive()
         info = device_mgr.reconnect(udid=udid, prefer_wifi=prefer_wifi)
         if loc_svc:
-            loc_svc.simulator = device_mgr.simulator
+            loc_svc.attach_device(device_mgr.simulator, device_mgr.bridge)
             if loc_svc.current_location:
                 loc_svc._start_keepalive()
         return jsonify({"status": "Switched", **info})
@@ -187,7 +190,10 @@ def api_device_connect():
             else:
                 info = device_mgr.connect(udid=udid, prefer_wifi=prefer_wifi, retries=3)
 
-            loc_svc = LocationService(device_mgr.simulator, device_mgr.bridge)
+            if loc_svc is None:
+                loc_svc = LocationService(device_mgr.simulator, device_mgr.bridge)
+            else:
+                loc_svc.attach_device(device_mgr.simulator, device_mgr.bridge)
             _start_schedule_checker()
             return jsonify({"status": "Connected", **info})
         except Exception as e:
@@ -216,7 +222,10 @@ def api_auto_reconnect():
         global loc_svc
         with _state_lock:
             if device_mgr and device_mgr.simulator:
-                loc_svc = LocationService(device_mgr.simulator, device_mgr.bridge)
+                if loc_svc is None:
+                    loc_svc = LocationService(device_mgr.simulator, device_mgr.bridge)
+                else:
+                    loc_svc.attach_device(device_mgr.simulator, device_mgr.bridge)
 
     if enabled:
         return jsonify(device_mgr.enable_auto_reconnect(
@@ -2622,12 +2631,13 @@ def main():
     try:
         info = device_mgr.connect(retries=5)
         print(f"    UDID: {info['udid']}")
-        loc_svc = LocationService(device_mgr.simulator, device_mgr.bridge)
+        loc_svc.attach_device(device_mgr.simulator, device_mgr.bridge)
         _start_schedule_checker()
         print("[+] Device connected")
     except Exception:
         print("[*] No device found yet — connect from the UI")
-        loc_svc = None
+        # Keep local saved data available while the UI waits for a device.
+        loc_svc.attach_device(None, None)
 
     print()
     print(f"[+] Ready! Open http://localhost:{PORT} in your browser")

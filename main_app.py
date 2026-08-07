@@ -67,12 +67,13 @@ def start_backend():
     """Initialize the userspace-first device connection and Flask server."""
     device_mgr = DeviceManager()
     app_module.device_mgr = device_mgr
-    app_module.loc_svc = None
+    if app_module.loc_svc is None:
+        app_module.loc_svc = LocationService(None, None)
 
     print("[*] Looking for device...")
     try:
         device_mgr.connect(retries=3)
-        app_module.loc_svc = LocationService(device_mgr.simulator, device_mgr.bridge)
+        app_module.loc_svc.attach_device(device_mgr.simulator, device_mgr.bridge)
         app_module._start_schedule_checker()
         print("[+] Device connected")
     except Exception:

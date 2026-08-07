@@ -128,6 +128,7 @@ class LocationService:
         self._route_emit_target_hz = EMIT_MAX_HZ
         self._route_emit_degraded = False
         self._route_emit_hz = 0
+
         self._route_emit_times = []
         self._route_write_latencies = []
         self._route_write_failures = 0
@@ -164,6 +165,11 @@ class LocationService:
         self._wander_center = None
         self._wander_radius = 0
         self._wander_speed = 5
+
+    def attach_device(self, simulator, bridge):
+        """Attach the current device transport without replacing saved state."""
+        self.simulator = simulator
+        self.bridge = bridge
 
     # ── Core ───────────────────────────────────────────────
 
