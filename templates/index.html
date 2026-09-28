@@ -3,94 +3,107 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="color-scheme" content="dark">
+    <meta name="theme-color" content="#0B111B">
     <title>Ghostpin</title>
+    <link rel="icon" type="image/png" href="/static/icon.png" />
     <link rel="stylesheet" href="/static/vendor/leaflet/leaflet.css" integrity="sha384-sHL9NAb7lN7rfvG5lfHpm643Xkcjzp4jFvuavGOndn6pjVqS6ny56CAt3nsEVT4H" crossorigin="anonymous" />
     <link rel="stylesheet" href="/static/css/style.css" />
 </head>
 <body>
 
-<!-- ═══ Onboarding overlay ═══ -->
-<div id="onboarding" role="dialog" aria-modal="true" aria-label="Set up Ghostpin">
+<!-- ═══ Onboarding ═══ -->
+<div id="onboarding" role="dialog" aria-modal="true" aria-labelledby="ob-title-1">
     <div class="ob-card">
         <div class="ob-page" id="ob-page-1">
-            <div class="ob-icon"><img src="/static/icon.png" alt="" /></div>
-            <h1 class="ob-title">Ghostpin</h1>
-            <p class="ob-sub">Change your iPhone's GPS location in one click.<br>The change is system-wide, so most apps follow it. Some — games and banking especially — run extra checks that GPS alone does not satisfy.</p>
-            <button class="btn btn-blue ob-btn" data-ob-next="2">Set Up Your Device</button>
-            <button class="btn btn-ghost ob-btn-skip" data-ob-skip="">Skip setup — I know what I'm doing</button>
+            <div class="ob-stage" aria-hidden="true">
+                <svg class="ob-contours" viewBox="0 0 400 170" preserveAspectRatio="none">
+                    <path d="M0 118 C60 92 110 132 170 112 S290 70 400 96" />
+                    <path d="M0 136 C70 112 120 150 190 130 S300 92 400 118" />
+                    <path d="M0 154 C80 132 130 166 210 148 S310 116 400 140" />
+                    <path d="M0 98 C50 76 100 112 160 94 S280 50 400 74" />
+                </svg>
+                <span class="ob-ripple"></span>
+                <span class="ob-ripple ob-ripple-late"></span>
+                <svg class="ob-pin" viewBox="0 0 40 52"><path d="M20 2C10.1 2 2 9.9 2 19.7 2 32.6 20 50 20 50s18-17.4 18-30.3C38 9.9 29.9 2 20 2z"/><ellipse cx="15.4" cy="19.4" rx="2.5" ry="3.3"/><ellipse cx="24.6" cy="19.4" rx="2.5" ry="3.3"/></svg>
+            </div>
+            <h1 class="ob-title" id="ob-title-1">Ghostpin</h1>
+            <p class="ob-sub">Put your iPhone anywhere on the map. The change is system-wide, so most apps follow it. Games and banking apps often run extra checks GPS alone won't pass.</p>
+            <button class="btn btn-primary btn-lg" data-ob-next="2">Set up my iPhone</button>
+            <button class="btn btn-quiet" data-ob-skip="">Skip setup</button>
         </div>
         <div class="ob-page hidden" id="ob-page-2">
             <div class="ob-badge">Step 1 of 3</div>
-            <h2 class="ob-title">Enable Developer Mode</h2>
-            <p class="ob-sub">This is required for your iPhone to accept simulated locations. It's a built-in Apple feature — safe to enable.</p>
-            <div class="ob-instructions">
-                <div class="ob-instr-step"><span class="ob-instr-num">1</span><span>Open <strong>Settings</strong> on your iPhone</span></div>
-                <div class="ob-instr-step"><span class="ob-instr-num">2</span><span>Go to <strong>Privacy & Security</strong></span></div>
-                <div class="ob-instr-step"><span class="ob-instr-num">3</span><span>Scroll down and tap <strong>Developer Mode</strong></span></div>
-                <div class="ob-instr-step"><span class="ob-instr-num">4</span><span>Toggle it <strong>ON</strong> and restart your iPhone when prompted</span></div>
-            </div>
+            <h2 class="ob-title">Turn on Developer Mode</h2>
+            <p class="ob-sub">Your iPhone only accepts a simulated location with this on. It's a built-in Apple setting and safe to enable.</p>
+            <ol class="ob-steps">
+                <li>Open <strong>Settings</strong> on your iPhone</li>
+                <li>Go to <strong>Privacy &amp; Security</strong></li>
+                <li>Scroll down and tap <strong>Developer Mode</strong></li>
+                <li>Switch it <strong>on</strong> and restart when prompted</li>
+            </ol>
             <div class="ob-note">
-                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/></svg>
-                <span>Don't see Developer Mode? Make sure your iPhone is running iOS 16 or later.</span>
+                <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9.5"/><path d="M12 16v-4M12 8h.01"/></svg>
+                <span>Don't see Developer Mode? It appears on iOS 16 and later.</span>
             </div>
             <div class="ob-nav">
-                <button class="btn btn-ghost" data-ob-next="1">Back</button>
-                <button class="btn btn-blue" data-ob-next="3">Next</button>
+                <button class="btn btn-secondary" data-ob-next="1">Back</button>
+                <button class="btn btn-primary" data-ob-next="3">Next</button>
             </div>
         </div>
         <div class="ob-page hidden" id="ob-page-3">
             <div class="ob-badge">Step 2 of 3</div>
-            <h2 class="ob-title">Connect & Trust</h2>
-            <p class="ob-sub">Plug your iPhone into your computer with a USB cable.</p>
-            <div class="ob-instructions">
-                <div class="ob-instr-step"><span class="ob-instr-num">1</span><span>Connect your iPhone via <strong>USB cable</strong> (Lightning or USB-C)</span></div>
-                <div class="ob-instr-step"><span class="ob-instr-num">2</span><span><strong>Unlock</strong> your iPhone</span></div>
-                <div class="ob-instr-step"><span class="ob-instr-num">3</span><span>Tap <strong>"Trust"</strong> when the "Trust This Computer?" dialog appears</span></div>
-                <div class="ob-instr-step"><span class="ob-instr-num">4</span><span>Enter your iPhone <strong>passcode</strong> to confirm</span></div>
-            </div>
+            <h2 class="ob-title">Connect and trust</h2>
+            <p class="ob-sub">Plug your iPhone into this computer with a cable.</p>
+            <ol class="ob-steps">
+                <li>Connect with a <strong>USB cable</strong> (Lightning or USB-C)</li>
+                <li><strong>Unlock</strong> your iPhone</li>
+                <li>Tap <strong>Trust</strong> when &ldquo;Trust This Computer?&rdquo; appears</li>
+                <li>Enter your <strong>passcode</strong> to confirm</li>
+            </ol>
             <div class="ob-note">
-                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/></svg>
-                <span>No dialog? Unplug and replug the cable, or go to Settings &rarr; General &rarr; Transfer or Reset &rarr; Reset Location & Privacy.</span>
+                <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9.5"/><path d="M12 16v-4M12 8h.01"/></svg>
+                <span>No prompt? Replug the cable, or reset it in Settings &rarr; General &rarr; Transfer or Reset &rarr; Reset Location &amp; Privacy.</span>
             </div>
             <div class="ob-nav">
-                <button class="btn btn-ghost" data-ob-next="2">Back</button>
-                <button class="btn btn-blue" data-ob-next="4">Next</button>
+                <button class="btn btn-secondary" data-ob-next="2">Back</button>
+                <button class="btn btn-primary" data-ob-next="4">Next</button>
             </div>
         </div>
         <div class="ob-page hidden" id="ob-page-4">
             <div class="ob-badge">Step 3 of 3</div>
-            <h2 class="ob-title">You're All Set</h2>
-            <p class="ob-sub">Here's how to use the app:</p>
-            <div class="ob-instructions">
-                <div class="ob-instr-step">
-                    <span class="ob-instr-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" stroke-width="2"><path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0118 0z"/><circle cx="12" cy="10" r="3"/></svg></span>
-                    <span><strong>Click the map</strong> to place a marker, then press Warp</span>
-                </div>
-                <div class="ob-instr-step">
-                    <span class="ob-instr-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" stroke-width="2"><path d="M22 2L11 13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg></span>
-                    <span>Turn on <strong>Teleport mode</strong> to set GPS with a single click</span>
-                </div>
-                <div class="ob-instr-step">
-                    <span class="ob-instr-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" stroke-width="2"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg></span>
-                    <span><strong>Search</strong> any address or place name in the top bar</span>
-                </div>
-                <div class="ob-instr-step">
-                    <span class="ob-instr-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" stroke-width="2"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg></span>
-                    <span><strong>Shift+click</strong> multiple points to simulate movement along a route</span>
-                </div>
-                <div class="ob-instr-step">
-                    <span class="ob-instr-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" stroke-width="2"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg></span>
-                    <span>Press <strong>G</strong> to open the anti-detection guide &mdash; stealth tips and app risk levels</span>
-                </div>
-            </div>
+            <h2 class="ob-title">You're all set</h2>
+            <p class="ob-sub">A few ways to get around:</p>
+            <ul class="ob-tips">
+                <li>
+                    <span class="ob-tip-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M20 10c0 6.5-8 12-8 12s-8-5.5-8-12a8 8 0 0116 0z"/><circle cx="12" cy="10" r="2.75"/></svg></span>
+                    <span><strong>Click the map</strong> to drop a pin, then press Warp</span>
+                </li>
+                <li>
+                    <span class="ob-tip-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M21.5 2.5l-10 10"/><path d="M21.5 2.5L15 21l-3.5-8.5L3 9z"/></svg></span>
+                    <span>Turn on <strong>Teleport</strong> to move with a single click</span>
+                </li>
+                <li>
+                    <span class="ob-tip-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="7"/><path d="M20.5 20.5l-4.5-4.5"/></svg></span>
+                    <span><strong>Search</strong> for any address, place, or coordinate</span>
+                </li>
+                <li>
+                    <span class="ob-tip-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><circle cx="5.5" cy="18.5" r="2.5"/><circle cx="18.5" cy="5.5" r="2.5"/><path d="M8 18.5h6.5a3.5 3.5 0 000-7h-5a3.5 3.5 0 010-7H16"/></svg></span>
+                    <span><strong>Shift-click</strong> several points to travel along a route</span>
+                </li>
+                <li>
+                    <span class="ob-tip-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M12 21.5s8-3.8 8-9.8V5l-8-3-8 3v6.7c0 6 8 9.8 8 9.8z"/></svg></span>
+                    <span>Press <kbd>G</kbd> for the consistency guide and app risk levels</span>
+                </li>
+            </ul>
             <div class="ob-note ob-note-live">
-                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 11.08V12a10 10 0 11-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>
-                <span>Newer iOS versions: Keep your phone plugged in while spoofing. Ghostpin maintains the simulated location while connected.</span>
+                <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M9 12.5l2 2 4-4.5"/><circle cx="12" cy="12" r="9.5"/></svg>
+                <span>On recent iOS versions, keep your iPhone connected while spoofing &mdash; Ghostpin holds the location for as long as it's plugged in.</span>
             </div>
-            <button class="btn btn-blue ob-btn" data-ob-done="">Start Using the App</button>
-            <label class="ob-check"><input type="checkbox" id="ob-dismiss" checked /> Don't show this again</label>
+            <button class="btn btn-primary btn-lg" data-ob-done="">Start using Ghostpin</button>
+            <label class="ob-check check-label"><input type="checkbox" id="ob-dismiss" checked /> Don't show this again</label>
         </div>
-        <div class="ob-dots">
+        <div class="ob-dots" aria-hidden="true">
             <span class="ob-dot active" data-page="1"></span>
             <span class="ob-dot" data-page="2"></span>
             <span class="ob-dot" data-page="3"></span>
@@ -99,180 +112,189 @@
     </div>
 </div>
 
-<!-- ═══ Toast container ═══ -->
+<!-- ═══ Toasts ═══ -->
 <div id="toasts" role="status" aria-live="polite"></div>
 
 <!-- ═══ Top bar ═══ -->
-<div id="topbar">
+<header id="topbar">
     <div class="topbar-left">
         <div class="brand-lockup" aria-label="Ghostpin">
             <img src="/static/icon.png" alt="" />
             <span>Ghostpin</span>
         </div>
         <div class="search-container">
-            <svg class="search-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
-            <input type="text" id="search-input" placeholder="Search places, addresses, or coordinates…" aria-label="Search places, addresses, or coordinates" autocomplete="off" />
+            <svg class="search-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="7"/><path d="M20.5 20.5l-4.5-4.5"/></svg>
+            <input type="text" id="search-input" placeholder="Search places, addresses, or coordinates" autocomplete="off" spellcheck="false" aria-label="Search places, addresses, or coordinates" />
             <div id="search-results"></div>
         </div>
     </div>
     <div class="topbar-right">
-        <button id="btn-update" class="teleport-btn" title="Check for Ghostpin updates">Updates</button>
-        <a id="update-download" class="teleport-btn hidden" href="https://github.com/Kron00/ghostpin/releases/latest" target="_blank" rel="noopener noreferrer">Download update</a>
-        <button id="btn-teleport" class="teleport-btn" title="Instant teleport: click map to set location immediately">
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 2L11 13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>
+        <a id="update-download" class="update-pill hidden" href="https://github.com/Kron00/ghostpin/releases/latest" target="_blank" rel="noopener noreferrer">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12M7 10l5 5 5-5M5 20h14"/></svg>
+            Download update
+        </a>
+        <button id="btn-teleport" class="tool-btn tool-btn-label" title="Teleport: one click on the map moves your iPhone (T)" aria-pressed="false">
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M21.5 2.5l-10 10"/><path d="M21.5 2.5L15 21l-3.5-8.5L3 9z"/></svg>
             <span>Teleport</span>
         </button>
-        <button id="btn-coord-fmt" class="teleport-btn" title="Toggle coordinate format" aria-label="Toggle coordinate format">DD</button>
-        <button id="btn-theme" class="teleport-btn" title="Toggle theme" aria-label="Toggle light and dark theme">
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="5"/><line x1="12" y1="1" x2="12" y2="3"/><line x1="12" y1="21" x2="12" y2="23"/><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/><line x1="1" y1="12" x2="3" y2="12"/><line x1="21" y1="12" x2="23" y2="12"/><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/></svg>
-        </button>
-        <button id="btn-stealth" class="teleport-btn" title="Anti-detection guide" aria-label="Open anti-detection guide">
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
-        </button>
-        <button id="btn-shortcuts" class="teleport-btn" title="Keyboard shortcuts" aria-label="Show keyboard shortcuts">?</button>
-        <div id="device-badge" role="button" tabindex="0" title="Click for device options" aria-label="Device options">
+        <div class="tool-group">
+            <button id="btn-coord-fmt" class="tool-btn tool-btn-text" title="Switch between decimal degrees and degrees-minutes-seconds" aria-label="Toggle coordinate format">DD</button>
+            <button id="btn-stealth" class="tool-btn" title="Location consistency guide (G)" aria-label="Open location consistency guide">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M12 21.5s8-3.8 8-9.8V5l-8-3-8 3v6.7c0 6 8 9.8 8 9.8z"/></svg>
+            </button>
+            <button id="btn-shortcuts" class="tool-btn" title="Keyboard shortcuts (?)" aria-label="Show keyboard shortcuts">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><rect x="2.5" y="6" width="19" height="12" rx="2.5"/><path d="M6.5 10h.01M10 10h.01M13.5 10h.01M17 10h.01M8 14h8"/></svg>
+            </button>
+            <button id="btn-update" class="tool-btn" title="Check for updates" aria-label="Check for Ghostpin updates">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M20.5 12a8.5 8.5 0 11-2.5-6"/><path d="M20.5 3.5V8H16"/></svg>
+            </button>
+        </div>
+        <div id="device-badge" role="button" tabindex="0" title="Device options" aria-label="Device options" aria-haspopup="true">
             <span id="device-dot" class="dot"></span>
-            <span id="device-label">Connecting...</span>
+            <span id="device-label">Connecting…</span>
             <span id="dev-conn" class="conn-badge">--</span>
+            <svg class="device-caret" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.25" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9l6 6 6-6"/></svg>
         </div>
     </div>
-</div>
+</header>
 
-<!-- ═══ Stealth Warning Banner ═══ -->
-<div id="stealth-banner" class="hidden">
+<!-- ═══ Consistency warning ═══ -->
+<div id="stealth-banner" class="hidden" role="alert">
     <div class="stealth-banner-content">
-        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M10.3 3.9L1.8 18a2 2 0 001.7 3h17a2 2 0 001.7-3L13.7 3.9a2 2 0 00-3.4 0z"/><path d="M12 9v4M12 17h.01"/></svg>
         <span id="stealth-banner-text">--</span>
         <button id="stealth-banner-tip" class="stealth-link">How to fix</button>
     </div>
-    <button id="stealth-banner-close" class="stealth-close" aria-label="Dismiss warning">&times;</button>
+    <button id="stealth-banner-close" class="stealth-close" aria-label="Dismiss warning">
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.25" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18"/></svg>
+    </button>
 </div>
 
-<!-- ═══ HUD: Location Panel (left) ═══ -->
-<div id="panel-location" role="region" aria-label="Location" class="hud-panel hud-panel-left">
+<!-- ═══ Location panel (left) ═══ -->
+<section id="panel-location" class="hud-panel hud-panel-left" aria-label="Location">
     <div class="hud-panel-header" data-panel="panel-location">
-        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0118 0z"/><circle cx="12" cy="10" r="3"/></svg>
-        <span>LOCATION</span>
-        <button class="hud-panel-close" data-panel="panel-location" aria-label="Collapse location panel">&times;</button>
+        <span class="hud-panel-icon"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M20 10c0 6.5-8 12-8 12s-8-5.5-8-12a8 8 0 0116 0z"/><circle cx="12" cy="10" r="2.75"/></svg></span>
+        <span>Location</span>
+        <button class="hud-panel-close" data-panel="panel-location" aria-label="Collapse location panel">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.25" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9l6 6 6-6"/></svg>
+        </button>
     </div>
     <div class="hud-panel-body">
-        <!-- Device info compact -->
-        <div id="device-info-compact">
-            <div class="meta-row"><span class="meta-label">iOS</span><span id="dev-ios">--</span></div>
-            <div class="meta-row"><span class="meta-label">Model</span><span id="dev-model">--</span></div>
-            <div class="meta-row"><span class="meta-label">UDID</span><span id="dev-udid" class="mono truncate">--</span></div>
-            <div class="device-readiness" aria-label="Device readiness">
-                <div class="meta-row"><span class="meta-label">Developer Mode</span><span id="dev-developer" class="readiness-value pending">Checking</span></div>
-                <div class="meta-row"><span class="meta-label">Developer Image</span><span id="dev-ddi" class="readiness-value pending">Checking</span></div>
-                <div class="meta-row"><span class="meta-label">Tunnel</span><span id="dev-tunnel" class="readiness-value pending">Checking</span></div>
-            </div>
-        </div>
-        <!-- Setup guide (shown when no device) -->
-        <div class="hidden" id="setup-guide">
-            <div class="setup-step"><span class="setup-dot"></span> Connect iPhone via USB or WiFi</div>
-            <div class="setup-step"><span class="setup-dot"></span> Tap "Trust This Computer"</div>
-            <div class="setup-step"><span class="setup-dot"></span> Enable Developer Mode</div>
+        <!-- Shown only while no iPhone is connected -->
+        <div class="hidden setup-card" id="setup-guide">
+            <div class="setup-card-title">Connect your iPhone</div>
+            <p class="setup-card-sub">Plug in with USB and tap &ldquo;Trust&rdquo;, with Developer Mode turned on. Wi-Fi works once you've paired over USB.</p>
             <div class="btn-group">
-                <button id="btn-connect" class="btn btn-blue btn-xs">Connect USB</button>
-                <button id="btn-connect-wifi" class="btn btn-ghost btn-xs">Connect WiFi</button>
+                <button id="btn-connect" class="btn btn-primary btn-sm">Connect USB</button>
+                <button id="btn-connect-wifi" class="btn btn-secondary btn-sm">Connect Wi-Fi</button>
             </div>
             <p class="hint" id="connect-status"></p>
         </div>
-        <!-- Coordinate display -->
+
+        <!-- The readout: the one loud thing -->
         <div class="coord-display" id="coord-display">
             <span id="coord-text" role="status" aria-live="polite">Click the map to set a location</span>
         </div>
-        <!-- Coordinate inputs -->
+
         <div id="coord-inputs">
-            <div class="coord-row">
-                <label for="lat-input">Lat</label>
-                <input type="number" id="lat-input" min="-90" max="90" step="any" aria-label="Latitude" placeholder="0.000000" />
-            </div>
-            <div class="coord-row">
-                <label for="lon-input">Lon</label>
-                <input type="number" id="lon-input" min="-180" max="180" step="any" aria-label="Longitude" placeholder="0.000000" />
-                <button id="btn-paste" class="btn-inline" title="Paste">Paste</button>
-            </div>
-        </div>
-        <!-- Action buttons -->
-        <div class="btn-group">
-            <button id="btn-set" class="btn btn-blue">
-                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 2L11 13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>
-                Warp
+            <label class="coord-field"><span>Lat</span><input type="number" id="lat-input" min="-90" max="90" step="any" placeholder="0.000000" aria-label="Latitude" /></label>
+            <label class="coord-field"><span>Lon</span><input type="number" id="lon-input" min="-180" max="180" step="any" placeholder="0.000000" aria-label="Longitude" /></label>
+            <button id="btn-paste" class="icon-btn" title="Paste coordinates or a Google Maps link" aria-label="Paste coordinates from clipboard">
+                <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><rect x="6" y="4" width="12" height="17" rx="2.5"/><path d="M9 4.5V3.5A1.5 1.5 0 0110.5 2h3A1.5 1.5 0 0115 3.5v1"/></svg>
             </button>
-            <button id="btn-clear" class="btn btn-ghost">Reset</button>
-            <button id="btn-undo" class="btn btn-ghost" disabled title="No previous location">Undo</button>
-            <button id="btn-save" class="btn btn-ghost">Save</button>
         </div>
-        <!-- Inline save form -->
+
+        <button id="btn-set" class="btn btn-primary btn-lg btn-warp">
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21.5 2.5l-10 10"/><path d="M21.5 2.5L15 21l-3.5-8.5L3 9z"/></svg>
+            Warp
+        </button>
+        <div class="btn-group btn-group-even">
+            <button id="btn-clear" class="btn btn-secondary btn-sm" title="Return your iPhone to its real location">Reset</button>
+            <button id="btn-undo" class="btn btn-secondary btn-sm" disabled title="No previous location">Undo</button>
+            <button id="btn-save" class="btn btn-secondary btn-sm">Save</button>
+        </div>
+
         <div id="save-form" class="inline-form hidden">
-            <div class="section-divider"></div>
-            <div class="inline-form-title">SAVE LOCATION</div>
-            <input type="text" id="save-name" aria-label="Location name" class="form-input" placeholder="Location name..." />
+            <div class="inline-form-title">Save this location</div>
+            <input type="text" id="save-name" class="form-input" placeholder="Name" aria-label="Location name" />
             <div class="category-pills">
                 <button class="cat-pill active" data-cat="default">Favorite</button>
                 <button class="cat-pill" data-cat="work">Work</button>
                 <button class="cat-pill" data-cat="gaming">Gaming</button>
             </div>
             <div class="btn-group">
-                <button id="btn-save-cancel" class="btn btn-ghost">Cancel</button>
-                <button id="btn-save-confirm" class="btn btn-blue">Save</button>
+                <button id="btn-save-cancel" class="btn btn-secondary btn-sm">Cancel</button>
+                <button id="btn-save-confirm" class="btn btn-primary btn-sm">Save</button>
             </div>
         </div>
-        <!-- Inline schedule form -->
+
         <div id="schedule-form" class="inline-form hidden">
-            <div class="section-divider"></div>
-            <div class="inline-form-title">ADD SCHEDULE</div>
-            <input type="text" id="schedule-name" aria-label="Schedule name" class="form-input" placeholder="Schedule name..." />
-            <input type="time" id="schedule-time" aria-label="Schedule time" class="form-input" value="08:00" />
+            <div class="inline-form-title">New schedule</div>
+            <input type="text" id="schedule-name" class="form-input" placeholder="Name" aria-label="Schedule name" />
+            <input type="time" id="schedule-time" class="form-input" value="08:00" aria-label="Schedule time" />
             <div class="day-pills">
-                <button class="day-pill active" data-day="mon">M</button>
-                <button class="day-pill active" data-day="tue">T</button>
-                <button class="day-pill active" data-day="wed">W</button>
-                <button class="day-pill active" data-day="thu">T</button>
-                <button class="day-pill active" data-day="fri">F</button>
-                <button class="day-pill" data-day="sat">S</button>
-                <button class="day-pill" data-day="sun">S</button>
+                <button class="day-pill active" data-day="mon" aria-label="Monday">M</button>
+                <button class="day-pill active" data-day="tue" aria-label="Tuesday">T</button>
+                <button class="day-pill active" data-day="wed" aria-label="Wednesday">W</button>
+                <button class="day-pill active" data-day="thu" aria-label="Thursday">T</button>
+                <button class="day-pill active" data-day="fri" aria-label="Friday">F</button>
+                <button class="day-pill" data-day="sat" aria-label="Saturday">S</button>
+                <button class="day-pill" data-day="sun" aria-label="Sunday">S</button>
             </div>
             <div class="btn-group">
-                <button id="btn-schedule-cancel" class="btn btn-ghost">Cancel</button>
-                <button id="btn-schedule-confirm" class="btn btn-blue">Add</button>
+                <button id="btn-schedule-cancel" class="btn btn-secondary btn-sm">Cancel</button>
+                <button id="btn-schedule-confirm" class="btn btn-primary btn-sm">Add schedule</button>
             </div>
         </div>
-        <!-- Cooldown -->
-        <div class="section-divider"></div>
-        <div class="cooldown-display">
-            <span id="cooldown-time" class="cooldown-time">00:00</span>
+
+        <div class="cooldown-display" title="How long to wait before a jump stops looking like impossible travel">
+            <span class="cooldown-label">Cooldown</span>
             <div class="progress-track"><div id="cooldown-bar" class="progress-bar cooldown-bar-fill"></div></div>
-            <span id="cooldown-badge" class="cooldown-badge hidden">SAFE</span>
+            <span id="cooldown-time" class="cooldown-time">00:00</span>
+            <span id="cooldown-badge" class="cooldown-badge hidden">Safe</span>
         </div>
-        <!-- Schedules in location panel -->
+
+        <!-- Shown once an iPhone is connected -->
+        <div id="device-info-compact" class="panel-section hidden">
+            <div class="panel-section-title"><span>Device</span></div>
+            <div class="meta-list">
+                <div class="meta-row"><span class="meta-label">iOS</span><span id="dev-ios">--</span></div>
+                <div class="meta-row"><span class="meta-label">Model</span><span id="dev-model">--</span></div>
+                <div class="meta-row"><span class="meta-label">UDID</span><span id="dev-udid" class="mono truncate">--</span></div>
+                <div class="meta-row"><span class="meta-label">Developer Mode</span><span id="dev-developer" class="readiness-value pending">Checking</span></div>
+                <div class="meta-row"><span class="meta-label">Developer Image</span><span id="dev-ddi" class="readiness-value pending">Checking</span></div>
+                <div class="meta-row"><span class="meta-label">Tunnel</span><span id="dev-tunnel" class="readiness-value pending">Checking</span></div>
+            </div>
+        </div>
+
         <div class="panel-section">
             <div class="panel-section-title">
                 <span>Schedules</span>
-                <button id="btn-schedule-add" class="btn-inline">+ Add</button>
+                <button id="btn-schedule-add" class="btn-inline">Add</button>
             </div>
             <div id="schedule-list" class="saved-list"><div class="empty-state">No schedules yet</div></div>
         </div>
     </div>
-</div>
+</section>
 
-<!-- ═══ HUD: Places Panel (left, below location) ═══ -->
-<div id="panel-places" role="region" aria-label="Places" class="hud-panel hud-panel-left hud-panel-below">
+<!-- ═══ Places panel (left, below Location) ═══ -->
+<section id="panel-places" class="hud-panel hud-panel-left hud-panel-below" aria-label="Places">
     <div class="hud-panel-header" data-panel="panel-places">
-        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg>
-        <span>PLACES</span>
-        <button class="hud-panel-close" data-panel="panel-places" aria-label="Collapse places panel">&times;</button>
+        <span class="hud-panel-icon"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2.5l2.9 6 6.6.9-4.8 4.6 1.2 6.5L12 17.4l-5.9 3.1 1.2-6.5L2.5 9.4l6.6-.9z"/></svg></span>
+        <span>Places</span>
+        <button class="hud-panel-close" data-panel="panel-places" aria-label="Collapse places panel">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.25" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9l6 6 6-6"/></svg>
+        </button>
     </div>
     <div class="hud-panel-body">
-        <div class="tab-bar">
-            <button class="tab-btn active" data-tab="recent">Recent</button>
+        <div class="tab-bar segmented">
+            <button class="tab-btn" data-tab="recent">Recent</button>
             <button class="tab-btn" data-tab="saved">Saved</button>
             <button class="tab-btn" data-tab="popular">Popular</button>
         </div>
-        <div class="tab-content active" id="tab-recent">
+        <div class="tab-content" id="tab-recent">
             <div id="recent-list" class="saved-list"><div class="empty-state">No recent locations</div></div>
-            <button id="btn-clear-recent" class="btn btn-ghost btn-xs">Clear recent</button>
+            <button id="btn-clear-recent" class="btn-inline btn-inline-muted">Clear recent</button>
         </div>
         <div class="tab-content" id="tab-saved">
             <div id="saved-list" class="saved-list"><div class="empty-state">No saved locations</div></div>
@@ -281,73 +303,79 @@
             <div id="popular-list" class="saved-list"></div>
         </div>
     </div>
-</div>
+</section>
 
-<!-- ═══ HUD: Movement Panel (right) ═══ -->
-<div id="panel-movement" role="region" aria-label="Movement" class="hud-panel hud-panel-right">
+<!-- ═══ Movement panel (right) ═══ -->
+<section id="panel-movement" class="hud-panel hud-panel-right" aria-label="Movement">
     <div class="hud-panel-header" data-panel="panel-movement">
-        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg>
-        <span>MOVEMENT</span>
-        <button class="hud-panel-close" data-panel="panel-movement" aria-label="Collapse movement panel">&times;</button>
+        <span class="hud-panel-icon"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><circle cx="5.5" cy="18.5" r="2.5"/><circle cx="18.5" cy="5.5" r="2.5"/><path d="M8 18.5h6.5a3.5 3.5 0 000-7h-5a3.5 3.5 0 010-7H16"/></svg></span>
+        <span>Movement</span>
+        <button class="hud-panel-close" data-panel="panel-movement" aria-label="Collapse movement panel">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.25" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9l6 6 6-6"/></svg>
+        </button>
     </div>
     <div class="hud-panel-body">
         <div class="panel-section">
             <div class="panel-section-title"><span>Speed</span></div>
-            <div class="mode-tabs" role="tablist" aria-label="Speed mode">
+            <div class="mode-tabs segmented" role="tablist" aria-label="Speed mode">
                 <button id="mode-flat" class="mode-tab active" type="button" role="tab" aria-selected="true" title="Hold one speed you choose for the whole route.&#10;Example: set 30 mph and the phone cruises ~30 the whole way, whatever the road.">Flat</button>
                 <button id="mode-realistic" class="mode-tab" type="button" role="tab" aria-selected="false" title="Drive like a real car: each road's posted limit plus a random 1-15 mph over (never under), stopping at lights and signs.&#10;Example: a 45 mph road → ~46-60; a 25 mph street → ~26-40.">Realistic</button>
             </div>
-            <div class="field-row" id="flat-speed-row">
-                <input type="number" id="speed-input" value="15" min="1" max="300" step="0.1" class="speed-field" aria-label="Movement speed" />
-                <button id="speed-unit-toggle" class="speed-unit-toggle" type="button" title="Switch between mph and km/h">km/h</button>
+            <div class="field-row speed-row" id="flat-speed-row">
+                <div class="unit-field">
+                    <input type="number" id="speed-input" value="15" min="1" max="300" step="0.1" class="speed-field" aria-label="Movement speed" />
+                    <button id="speed-unit-toggle" class="speed-unit-toggle" type="button" title="Switch between mph and km/h">km/h</button>
+                </div>
             </div>
-            <p class="hint hidden" id="adaptive-note">Drives each road's posted limit plus a random 1-15 mph over — never under — and stops at signals, signs, and route stops. Where no limit is posted it uses a typical local speed.</p>
+            <p class="hint hidden" id="adaptive-note">Drives each road's posted limit plus a random 1&ndash;15 mph over &mdash; never under &mdash; and stops at signals, signs, and route stops. Where no limit is posted it uses a typical local speed.</p>
         </div>
-        <!-- How the route gets built: by address, by circle, or by map clicks -->
+
         <div class="panel-section">
-            <div class="panel-section-title"><span>Build a route</span><button id="btn-build-help" class="icon-btn" type="button" title="What are these?" aria-label="What are these?">?</button></div>
-            <div class="mode-tabs" role="tablist" aria-label="Route builder">
+            <div class="panel-section-title">
+                <span>Build a route</span>
+                <button id="btn-build-help" class="icon-btn icon-btn-sm" type="button" title="What are these?" aria-label="What are these?">?</button>
+            </div>
+            <div class="mode-tabs segmented" role="tablist" aria-label="Route builder">
                 <button class="mode-tab active" data-build="stops" role="tab" aria-selected="true">Stops</button>
                 <button class="mode-tab" data-build="roam" role="tab" aria-selected="false">Roam</button>
                 <button class="mode-tab" data-build="map" role="tab" aria-selected="false">Map</button>
             </div>
 
-            <!-- Stops: any number of addresses, each with search -->
             <div class="build-pane active" id="build-stops">
                 <div id="stop-list" class="stop-list"></div>
-                <label class="check-label"><input type="checkbox" id="close-loop" /> Return to the start, closing the loop</label>
-                <div class="btn-group">
-                    <button id="btn-add-stop" class="btn btn-ghost btn-xs">+ Add stop</button>
-                    <button id="btn-swap-stops" class="btn btn-ghost btn-xs" title="Reverse the order of the stops">Reverse</button>
+                <label class="check-label"><input type="checkbox" id="close-loop" /> Return to the start</label>
+                <div class="btn-group btn-group-even">
+                    <button id="btn-add-stop" class="btn btn-secondary btn-sm">Add stop</button>
+                    <button id="btn-swap-stops" class="btn btn-secondary btn-sm" title="Reverse the order of the stops">Reverse</button>
                 </div>
-                <button id="btn-route-calculate" class="btn btn-blue btn-xs">Calculate route</button>
+                <button id="btn-route-calculate" class="btn btn-primary btn-sm">Calculate route</button>
             </div>
 
-            <!-- Roam: move about at random inside an area, rather than along a path -->
             <div class="build-pane" id="build-roam">
                 <div class="stop-row">
                     <span class="stop-marker" aria-hidden="true">◎</span>
                     <button id="btn-roam-center" class="stop-slot is-empty" type="button">Centre — click to pick it on the map</button>
                 </div>
                 <div class="field-row">
-                    <label for="roam-radius-slider">Stay within</label>
-                    <input type="number" id="roam-radius" class="wander-input" value="1" min="0.05" max="30" step="0.01" aria-label="Roam radius" />
-                    <button id="roam-unit-toggle" class="speed-unit-toggle" type="button" title="Switch between miles and kilometres">mi</button>
+                    <label for="roam-radius">Stay within</label>
+                    <div class="unit-field">
+                        <input type="number" id="roam-radius" class="wander-input" value="1" min="0.05" max="30" step="0.01" aria-label="Roam radius" />
+                        <button id="roam-unit-toggle" class="speed-unit-toggle" type="button" title="Switch between miles and kilometres">mi</button>
+                    </div>
                 </div>
                 <input type="range" id="roam-radius-slider" class="slider" value="1" min="0.05" max="30" step="0.01" aria-label="Roam radius slider" />
                 <div class="btn-group">
-                    <button id="btn-roam-start" class="btn btn-blue btn-xs" disabled>Start roaming</button>
-                    <button id="btn-roam-stop" class="btn btn-red btn-xs" disabled>Stop</button>
+                    <button id="btn-roam-start" class="btn btn-primary btn-sm" disabled>Start roaming</button>
+                    <button id="btn-roam-stop" class="btn btn-danger btn-sm" disabled>Stop</button>
                 </div>
             </div>
 
-            <!-- Map: point at places instead of naming them -->
             <div class="build-pane" id="build-map">
-                <button id="btn-map-pick" class="btn btn-blue btn-xs">Click the map to add stops</button>
+                <button id="btn-map-pick" class="btn btn-primary btn-sm">Click the map to add stops</button>
             </div>
 
             <div id="route-address-status" class="route-address-status hidden"></div>
-            <p class="hint" id="route-hint">Shift+click map to add route points</p>
+            <p class="hint" id="route-hint">Shift-click the map to add route points</p>
         </div>
 
         <div class="panel-section">
@@ -356,182 +384,192 @@
                 <select id="route-mode" aria-label="Route repeat mode">
                     <option value="once">Once</option>
                     <option value="loop">Loop</option>
-                    <option value="pingpong">Ping-Pong</option>
+                    <option value="pingpong">Ping-pong</option>
                 </select>
                 <label class="check-label"><input type="checkbox" id="speed-randomize" /> Randomize</label>
                 <label class="check-label"><input type="checkbox" id="follow-mode" /> Follow</label>
             </div>
             <div class="btn-group">
-                <button id="btn-route-start" class="btn btn-blue" disabled>Start</button>
-                <button id="btn-route-pause" class="btn btn-ghost hidden">Pause</button>
-                <button id="btn-route-resume" class="btn btn-blue hidden">Resume</button>
-                <button id="btn-route-stop" class="btn btn-red" disabled>Stop</button>
-                <button id="btn-route-clear" class="btn btn-ghost">Clear</button>
+                <button id="btn-route-start" class="btn btn-primary" disabled>
+                    <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor"><path d="M7 4.5v15a1 1 0 001.5.9l12-7.5a1 1 0 000-1.8l-12-7.5A1 1 0 007 4.5z"/></svg>
+                    Start
+                </button>
+                <button id="btn-route-pause" class="btn btn-secondary hidden">Pause</button>
+                <button id="btn-route-resume" class="btn btn-primary hidden">Resume</button>
+                <button id="btn-route-stop" class="btn btn-danger" disabled>Stop</button>
+                <button id="btn-route-clear" class="btn btn-secondary">Clear</button>
             </div>
             <div id="route-progress" class="route-progress hidden">
                 <div class="progress-track"><div id="progress-bar" class="progress-bar"></div></div>
                 <span id="route-pct">0%</span>
             </div>
-            <button id="btn-route-save-open" class="btn btn-ghost btn-xs" disabled>Save route</button>
+            <button id="btn-route-save-open" class="btn-inline" disabled>Save route</button>
             <div id="route-save-form" class="inline-form hidden">
                 <div class="inline-form-title">Save route</div>
-                <input type="text" id="route-save-name" aria-label="Route name" class="form-input" placeholder="Route name..." />
+                <input type="text" id="route-save-name" class="form-input" placeholder="Name" aria-label="Route name" />
                 <div class="btn-group">
-                    <button id="btn-route-save-cancel" class="btn btn-ghost">Cancel</button>
-                    <button id="btn-route-save-confirm" class="btn btn-blue">Save</button>
+                    <button id="btn-route-save-cancel" class="btn btn-secondary btn-sm">Cancel</button>
+                    <button id="btn-route-save-confirm" class="btn btn-primary btn-sm">Save</button>
                 </div>
             </div>
         </div>
-        <!-- Joystick -->
+
         <div class="panel-section">
             <div class="panel-section-title">
                 <span>Joystick</span>
-                <span class="hint">WASD / Arrows</span>
+                <span class="hint">WASD or arrow keys</span>
             </div>
             <div class="joystick-grid" role="group" aria-label="Joystick movement">
                 <div></div>
-                <button class="joy-btn" data-dir="n" title="North" aria-label="Move north">&#9650;</button>
+                <button class="joy-btn" data-dir="n" title="North" aria-label="Move north"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.25" stroke-linecap="round" stroke-linejoin="round"><path d="M6 15l6-6 6 6"/></svg></button>
                 <div></div>
-                <button class="joy-btn" data-dir="w" title="West" aria-label="Move west">&#9664;</button>
-                <button class="joy-btn joy-stop" id="btn-joy-stop" title="Stop" aria-label="Stop moving">&#9632;</button>
-                <button class="joy-btn" data-dir="e" title="East" aria-label="Move east">&#9654;</button>
+                <button class="joy-btn" data-dir="w" title="West" aria-label="Move west"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.25" stroke-linecap="round" stroke-linejoin="round"><path d="M15 6l-6 6 6 6"/></svg></button>
+                <button class="joy-btn joy-stop" id="btn-joy-stop" title="Stop" aria-label="Stop moving"><svg width="10" height="10" viewBox="0 0 24 24" fill="currentColor"><rect x="4" y="4" width="16" height="16" rx="3"/></svg></button>
+                <button class="joy-btn" data-dir="e" title="East" aria-label="Move east"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.25" stroke-linecap="round" stroke-linejoin="round"><path d="M9 6l6 6-6 6"/></svg></button>
                 <div></div>
-                <button class="joy-btn" data-dir="s" title="South" aria-label="Move south">&#9660;</button>
+                <button class="joy-btn" data-dir="s" title="South" aria-label="Move south"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.25" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9l6 6 6-6"/></svg></button>
                 <div></div>
             </div>
         </div>
-        <!-- Route History -->
+
         <div class="panel-section">
             <div class="panel-section-title">
                 <span>Route history</span>
-                <button id="btn-route-save" class="btn-inline" style="display:none">+ Save</button>
+                <button id="btn-route-save" class="btn-inline" style="display:none">Save</button>
             </div>
             <div id="route-history-list" class="saved-list"><div class="empty-state">No saved routes yet</div></div>
         </div>
-        <!-- Inline profile save form -->
+
         <div id="profile-form" class="inline-form hidden">
-            <div class="section-divider"></div>
-            <div class="inline-form-title">SAVE PROFILE</div>
-            <input type="text" id="profile-name" aria-label="Profile name" class="form-input" placeholder="Profile name..." />
+            <div class="inline-form-title">Save profile</div>
+            <input type="text" id="profile-name" class="form-input" placeholder="Name" aria-label="Profile name" />
             <div class="btn-group">
-                <button id="btn-profile-cancel" class="btn btn-ghost">Cancel</button>
-                <button id="btn-profile-confirm" class="btn btn-blue">Save</button>
+                <button id="btn-profile-cancel" class="btn btn-secondary btn-sm">Cancel</button>
+                <button id="btn-profile-confirm" class="btn btn-primary btn-sm">Save</button>
             </div>
         </div>
-        <!-- Profiles -->
         <div class="panel-section">
             <div class="panel-section-title">
                 <span>Profiles</span>
-                <button id="btn-profile-save" class="btn-inline">+ Save</button>
+                <button id="btn-profile-save" class="btn-inline">Save current</button>
             </div>
             <div id="profile-list" class="saved-list"><div class="empty-state">No profiles yet</div></div>
         </div>
     </div>
-</div>
+</section>
 
-<!-- ═══ HUD: Bottom Status Bar ═══ -->
-<div id="status-bar">
-    <div class="status-pill" id="status-cooldown">
+<!-- ═══ Status bar ═══ -->
+<div id="status-bar" role="status">
+    <div class="status-pill" id="status-cooldown" title="Cooldown before the next jump looks natural">
         <span class="status-dot connected" id="status-dot"></span>
-        <span id="status-cooldown-text">SAFE</span>
+        <span id="status-cooldown-text">Safe</span>
     </div>
     <div class="status-pill" id="status-speed">
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 14l4-4"/><path d="M3.5 17a9 9 0 1117 0"/></svg>
         <span id="status-speed-text">15 km/h</span>
     </div>
     <div class="status-pill hidden" id="status-route">
         <span id="status-route-text">--</span>
     </div>
-    <div class="status-pill" id="status-stealth">
+    <button class="status-pill" id="status-stealth" type="button">
         <span class="status-dot connected" id="status-stealth-dot"></span>
-        <span id="status-stealth-text">STEALTH</span>
-    </div>
+        <span id="status-stealth-text">Consistency</span>
+    </button>
     <div class="status-pill" id="status-connection">
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="6.5" y="2" width="11" height="20" rx="2.5"/><path d="M11 18.5h2"/></svg>
         <span id="status-conn-text">--</span>
     </div>
 </div>
 
-<!-- ═══ HUD: Coordinate HUD (bottom-right) ═══ -->
+<!-- ═══ Cursor coordinates ═══ -->
 <div id="coord-hud" class="hidden">
     <span id="coord-hud-text">--</span>
 </div>
 
-<!-- ═══ Keyboard Shortcuts Overlay ═══ -->
-<div id="shortcuts-overlay" class="hidden" role="dialog" aria-modal="true" aria-label="Keyboard shortcuts">
-    <div class="shortcuts-card">
-        <div class="shortcuts-header">
-            <span>KEYBOARD SHORTCUTS</span>
-            <button id="btn-shortcuts-close" class="hud-panel-close" aria-label="Close keyboard shortcuts">&times;</button>
+<!-- ═══ Keyboard shortcuts ═══ -->
+<div id="shortcuts-overlay" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="shortcuts-title">
+    <div class="modal-card shortcuts-card">
+        <div class="modal-header">
+            <span id="shortcuts-title">Keyboard shortcuts</span>
+            <button id="btn-shortcuts-close" class="modal-close" aria-label="Close keyboard shortcuts">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.25" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18"/></svg>
+            </button>
         </div>
-        <div class="shortcuts-body">
-            <div class="shortcut-row"><kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd> or Arrows<span>Joystick movement</span></div>
-            <div class="shortcut-row"><kbd>Shift</kbd> + Click<span>Add route waypoint</span></div>
-            <div class="shortcut-row"><kbd>T</kbd><span>Toggle teleport mode</span></div>
-            <div class="shortcut-row"><kbd>G</kbd><span>Anti-detection guide</span></div>
-            <div class="shortcut-row"><kbd>Esc</kbd><span>Close panel / form</span></div>
-            <div class="shortcut-row"><kbd>?</kbd><span>Show / hide shortcuts</span></div>
-            <div class="shortcut-row"><kbd>+</kbd> / <kbd>-</kbd><span>Zoom in / out</span></div>
+        <div class="modal-body shortcuts-body">
+            <div class="shortcut-row"><span>Move with the joystick</span><span class="keys"><kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd> or arrows</span></div>
+            <div class="shortcut-row"><span>Add a route point</span><span class="keys"><kbd>Shift</kbd> + click</span></div>
+            <div class="shortcut-row"><span>Toggle Teleport</span><span class="keys"><kbd>T</kbd></span></div>
+            <div class="shortcut-row"><span>Location consistency guide</span><span class="keys"><kbd>G</kbd></span></div>
+            <div class="shortcut-row"><span>Close a panel or form</span><span class="keys"><kbd>Esc</kbd></span></div>
+            <div class="shortcut-row"><span>Show or hide shortcuts</span><span class="keys"><kbd>?</kbd></span></div>
+            <div class="shortcut-row"><span>Zoom in or out</span><span class="keys"><kbd>+</kbd><kbd>&minus;</kbd></span></div>
         </div>
     </div>
 </div>
 
-<!-- ═══ Anti-Detection Tips Overlay ═══ -->
-<div id="tips-overlay" class="hidden" role="dialog" aria-modal="true" aria-label="Location simulation guide">
-    <div class="tips-card">
-        <div class="tips-header">
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" stroke-width="2"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
-            <span>ANTI-DETECTION GUIDE</span>
-            <button id="btn-tips-close" class="hud-panel-close" aria-label="Close anti-detection guide">&times;</button>
+<!-- ═══ Anti-detection guide ═══ -->
+<div id="tips-overlay" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="tips-title">
+    <div class="modal-card tips-card">
+        <div class="modal-header">
+            <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M12 21.5s8-3.8 8-9.8V5l-8-3-8 3v6.7c0 6 8 9.8 8 9.8z"/></svg>
+            <span id="tips-title">Location consistency guide</span>
+            <button id="btn-tips-close" class="modal-close" aria-label="Close location consistency guide">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.25" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18"/></svg>
+            </button>
         </div>
-        <div class="tips-body">
+        <div class="modal-body tips-body">
             <div class="tips-section">
-                <div class="tips-section-title tips-green">WHAT GHOSTPIN ACTUALLY DOES</div>
-                <div class="tips-item"><span class="tips-check">&#10003;</span> Real road routes &mdash; movement follows actual streets at a set speed, rather than a straight line</div>
-                <div class="tips-item"><span class="tips-check">&#10003;</span> Adaptive speed &mdash; optional; follows posted limits and eases off at junctions</div>
-                <div class="tips-item"><span class="tips-check">&#10003;</span> Cooldown timer &mdash; <strong>warns</strong> you when a jump would look like impossible travel. It does not block the jump; that is your call</div>
-                <div class="tips-item"><span class="tips-check">&#10003;</span> Speed randomisation &mdash; optional, off by default; varies pace along a route</div>
-                <div class="tips-item"><span class="tips-check">&#10003;</span> IP mismatch alert &mdash; warns when your connection says one place and your GPS says another</div>
-                <div class="tips-item tips-hint">Ghostpin does not add GPS jitter. Reasserting a slightly different pin each second makes a stationary spoof visibly wobble in Maps, and on recent iOS it can read as two competing location sources &mdash; which is worse than sitting still.</div>
+                <div class="tips-section-title tips-green">What Ghostpin does for you</div>
+                <div class="tips-item"><span class="tips-check">&#10003;</span><span><strong>Real road routes.</strong> Movement follows actual streets at a set speed, not a straight line.</span></div>
+                <div class="tips-item"><span class="tips-check">&#10003;</span><span><strong>Adaptive speed.</strong> Optional; follows posted limits and eases off at junctions.</span></div>
+                <div class="tips-item"><span class="tips-check">&#10003;</span><span><strong>Cooldown timer.</strong> Warns you when a jump would look like impossible travel. It doesn't block the jump &mdash; that's your call.</span></div>
+                <div class="tips-item"><span class="tips-check">&#10003;</span><span><strong>Speed randomization.</strong> Optional and off by default; varies pace along a route.</span></div>
+                <div class="tips-item"><span class="tips-check">&#10003;</span><span><strong>IP mismatch alert.</strong> Warns when your connection says one place and your GPS says another.</span></div>
+                <p class="tips-hint">Ghostpin doesn't add GPS jitter. Reasserting a slightly different pin every second makes a stationary spoof visibly wobble in Maps, and on recent iOS it can read as two competing location sources &mdash; worse than sitting still.</p>
             </div>
             <div class="tips-section">
-                <div class="tips-section-title tips-amber">WHAT YOU SHOULD DO</div>
-                <div class="tips-item"><span class="tips-num">1</span> Use a <strong>VPN</strong> matching your spoofed region for streaming &amp; banking</div>
-                <div class="tips-item"><span class="tips-num">2</span> Change <strong>timezone</strong>: Settings &rarr; General &rarr; Date &amp; Time &rarr; disable Auto</div>
-                <div class="tips-item"><span class="tips-num">3</span> Move naturally &mdash; use <strong>routes and wander</strong> instead of teleporting</div>
-                <div class="tips-item"><span class="tips-num">4</span> Respect <strong>cooldowns</strong> &mdash; wait for the timer to turn green</div>
-                <div class="tips-item"><span class="tips-num">5</span> Avoid rapid teleporting &mdash; apps flag <strong>impossible travel</strong></div>
+                <div class="tips-section-title tips-amber">What you should do</div>
+                <div class="tips-item"><span class="tips-num">1</span><span>Use a <strong>VPN</strong> in your spoofed region for streaming and banking</span></div>
+                <div class="tips-item"><span class="tips-num">2</span><span>Change your <strong>time zone</strong>: Settings &rarr; General &rarr; Date &amp; Time, turn off Set Automatically</span></div>
+                <div class="tips-item"><span class="tips-num">3</span><span>Move naturally &mdash; use <strong>routes and roaming</strong> instead of teleporting</span></div>
+                <div class="tips-item"><span class="tips-num">4</span><span>Respect the <strong>cooldown</strong> &mdash; wait until it reads Safe</span></div>
+                <div class="tips-item"><span class="tips-num">5</span><span>Avoid rapid teleports &mdash; apps flag <strong>impossible travel</strong></span></div>
             </div>
             <div class="tips-section">
-                <div class="tips-section-title">APP RISK LEVELS</div>
-                <div class="tips-item"><span class="tips-dot tips-dot-green"></span> <strong>Safe:</strong> Maps, Weather, Social media, Dating, Delivery</div>
-                <div class="tips-item"><span class="tips-dot tips-dot-amber"></span> <strong>Moderate:</strong> Uber/Lyft, Snapchat, Life360 (use routes)</div>
-                <div class="tips-item"><span class="tips-dot tips-dot-red"></span> <strong>Advanced:</strong> Pokemon Go, Banking apps (use VPN + cooldown)</div>
+                <div class="tips-section-title">App risk levels</div>
+                <div class="tips-item"><span class="tips-dot tips-dot-green"></span><span><strong>Low:</strong> Maps, Weather, social, dating, delivery</span></div>
+                <div class="tips-item"><span class="tips-dot tips-dot-amber"></span><span><strong>Moderate:</strong> Uber, Lyft, Snapchat, Life360 &mdash; use routes</span></div>
+                <div class="tips-item"><span class="tips-dot tips-dot-red"></span><span><strong>High:</strong> Pok&eacute;mon Go, banking apps &mdash; use a VPN and the cooldown</span></div>
             </div>
             <div class="tips-section">
-                <div class="tips-section-title tips-red">HONEST LIMITATIONS</div>
-                <div class="tips-item"><span class="tips-x">&times;</span> CLLocation metadata (speed/altitude) &mdash; Apple API limitation</div>
-                <div class="tips-item"><span class="tips-x">&times;</span> Motion sensors &mdash; accelerometer shows phone is stationary</div>
-                <div class="tips-item"><span class="tips-x">&times;</span> WiFi/Bluetooth fingerprinting &mdash; used by banking fraud SDKs</div>
-                <div class="tips-item"><span class="tips-x">&times;</span> Cell tower triangulation &mdash; carrier infrastructure</div>
-                <div class="tips-hint">Most consumer apps don't check these. Banking &amp; gaming apps may.</div>
+                <div class="tips-section-title tips-red">What GPS spoofing can't hide</div>
+                <div class="tips-item"><span class="tips-x">&times;</span><span>CLLocation metadata such as speed and altitude &mdash; an Apple API limit</span></div>
+                <div class="tips-item"><span class="tips-x">&times;</span><span>Motion sensors &mdash; the accelerometer shows the phone is still</span></div>
+                <div class="tips-item"><span class="tips-x">&times;</span><span>Wi-Fi and Bluetooth fingerprinting used by banking fraud SDKs</span></div>
+                <div class="tips-item"><span class="tips-x">&times;</span><span>Cell tower triangulation by your carrier</span></div>
+                <p class="tips-hint">Most consumer apps don't check these. Banking and gaming apps may.</p>
             </div>
         </div>
     </div>
 </div>
 
 <!-- ═══ Route builder help ═══ -->
-<div id="build-help" class="hidden" role="dialog" aria-modal="true" aria-label="Ways to build a route">
-    <div class="help-card">
-        <div class="help-header"><span>Ways to build a route</span>
-            <button id="btn-build-help-close" class="hud-panel-close" aria-label="Close">&times;</button></div>
-        <div class="help-body">
+<div id="build-help" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="build-help-title">
+    <div class="modal-card help-card">
+        <div class="modal-header"><span id="build-help-title">Ways to build a route</span>
+            <button id="btn-build-help-close" class="modal-close" aria-label="Close">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.25" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18"/></svg>
+            </button>
+        </div>
+        <div class="modal-body help-body">
             <div class="help-item"><strong>Stops</strong><span>An ordered itinerary: A to B, with as many stops between as you like. Fill each one from the search bar or by pointing at the map, drag the letters to reorder, and tick <em>Return to the start</em> to close the loop. <em>Calculate route</em> then follows real roads.</span></div>
-            <div class="help-item"><strong>Roam</strong><span>No path at all. Pick a centre and a radius, and the location wanders at random inside that area, changing direction as it goes. Good for looking like you are somewhere without going anywhere in particular.</span></div>
-            <div class="help-item"><strong>Map</strong><span>Lay out a route by pointing. Each click adds the next stop, so you can trace a whole journey without typing. Press <kbd>Esc</kbd> when you are done. These stops behave exactly like searched ones, so the two can be mixed.</span></div>
+            <div class="help-item"><strong>Roam</strong><span>No path at all. Pick a centre and a radius, and the location wanders at random inside that area, changing direction as it goes. Good for looking like you're somewhere without going anywhere in particular.</span></div>
+            <div class="help-item"><strong>Map</strong><span>Lay out a route by pointing. Each click adds the next stop, so you can trace a whole journey without typing. Press <kbd>Esc</kbd> when you're done. These stops behave exactly like searched ones, so the two can be mixed.</span></div>
         </div>
     </div>
 </div>
 
-<!-- ═══ Multi-device dropdown ═══ -->
+<!-- ═══ Device menu ═══ -->
 <div id="device-dropdown" class="hidden">
     <div id="device-dropdown-list"></div>
 </div>
@@ -539,19 +577,20 @@
 <!-- ═══ Map ═══ -->
 <div id="map" role="application" aria-label="Map. Click to set a location."></div>
 
-<!-- ═══ Map controls ═══ -->
 <div id="map-controls" role="group" aria-label="Map controls">
     <button id="btn-my-location" class="map-btn" title="Back to my approximate location" aria-label="Back to my approximate location">
-        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="4"/><circle cx="12" cy="12" r="9"/><line x1="12" y1="1" x2="12" y2="4"/><line x1="12" y1="20" x2="12" y2="23"/><line x1="1" y1="12" x2="4" y2="12"/><line x1="20" y1="12" x2="23" y2="12"/></svg>
+        <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3.5"/><circle cx="12" cy="12" r="8"/><path d="M12 1.5V4M12 20v2.5M1.5 12H4M20 12h2.5"/></svg>
     </button>
-    <button id="btn-zoom-in" class="map-btn" title="Zoom in" aria-label="Zoom in">
-        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
-    </button>
-    <button id="btn-zoom-out" class="map-btn" title="Zoom out" aria-label="Zoom out">
-        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="5" y1="12" x2="19" y2="12"/></svg>
-    </button>
-    <button id="btn-layer" class="map-btn" title="Toggle map style" aria-label="Toggle map style">
-        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><polygon points="1 6 1 22 8 18 16 22 23 18 23 2 16 6 8 2 1 6"/><line x1="8" y1="2" x2="8" y2="18"/><line x1="16" y1="6" x2="16" y2="22"/></svg>
+    <div class="map-btn-group">
+        <button id="btn-zoom-in" class="map-btn" title="Zoom in" aria-label="Zoom in">
+            <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>
+        </button>
+        <button id="btn-zoom-out" class="map-btn" title="Zoom out" aria-label="Zoom out">
+            <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M5 12h14"/></svg>
+        </button>
+    </div>
+    <button id="btn-layer" class="map-btn" title="Switch between night and day map" aria-label="Toggle map style">
+        <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2.5l9.5 5-9.5 5-9.5-5z"/><path d="M2.5 12l9.5 5 9.5-5"/><path d="M2.5 16.5l9.5 5 9.5-5"/></svg>
     </button>
 </div>
 

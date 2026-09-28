@@ -40,7 +40,7 @@ remain active until reset or the developer connection ends.
 - Saved and recent locations, profiles, schedules, and route history
 - Multi-device selection over USB or paired Wi-Fi
 - Cooldown, GPS jitter, IP/GPS mismatch, and timezone guidance
-- Dark and light cartographic themes in a native pywebview window
+- A dark, map-first interface in a native pywebview window, with a night or day basemap
 
 ## Requirements
 
@@ -303,7 +303,8 @@ main_app.py            native pywebview entry point
 templates/index.html   application workspace
 static/css/style.css   Ghostpin cartographic visual system
 static/js/app.js       map and interaction logic
-icon.png               original Ghostpin app icon
+icon.svg               app icon source (renders icon.png and static/icon.png)
+icon.png               app icon, 1024px macOS grid
 build.sh               macOS app and DMG build
 ```
 

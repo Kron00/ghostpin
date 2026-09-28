@@ -124,7 +124,7 @@ def main():
             width=1280,
             height=800,
             min_size=(900, 600),
-            background_color="#17363a",
+            background_color="#0B111B",
             text_select=False,
             js_api=native_api,
         )

@@ -11,11 +11,11 @@ let routeStarting = false;
 let lastRouteStatus = null;
 let searchTimeout = null;
 let selectedSpeed = 15;
-let darkTiles = true;
+// Night map by default; a daylight basemap stays one click away for reading street detail.
+let darkTiles = localStorage.getItem("map_style") !== "day";
 let teleportMode = false;
 let recentLocations = [];
 let coordFormat = localStorage.getItem("coord_fmt") || "dd";
-let lightTheme = localStorage.getItem("theme") === "light";
 let previousLocation = null;
 let followMode = false;
 let movementPolling = null;
@@ -160,6 +160,18 @@ function createMapTiles(dark) {
     });
 }
 
+// Map ink, kept in step with the tokens at the top of style.css. Cream is the
+// path from the app icon; sage marks ground already covered.
+const MAP_INK = {
+    path: "#EFE3C8",
+    draft: "#A9B6C8",
+    travelled: "#7CCBB2",
+};
+
+// The ghost pin from the app icon, anchored at its tip.
+const PIN_ICON_HTML = '<div class="map-marker"><span class="map-marker-pulse"></span><span class="map-marker-shadow"></span>'
+    + '<svg class="map-marker-pin" viewBox="0 0 40 52" aria-hidden="true"><path d="M20 2C10.1 2 2 9.9 2 19.7 2 32.6 20 50 20 50s18-17.4 18-30.3C38 9.9 29.9 2 20 2z"/><ellipse cx="15.4" cy="19.4" rx="2.5" ry="3.3"/><ellipse cx="24.6" cy="19.4" rx="2.5" ry="3.3"/></svg></div>';
+
 const POPULAR = [
     { name: "Times Square, NYC", lat: 40.7580, lon: -73.9855 },
     { name: "Eiffel Tower, Paris", lat: 48.8584, lon: 2.2945 },
@@ -178,12 +190,11 @@ const SEARCH_ICON_SVG = '<svg width="14" height="14" viewBox="0 0 24 24" fill="n
 
 // ── Init ─────────────────────────────────────────────────────
 document.addEventListener("DOMContentLoaded", async () => {
-    if (lightTheme) document.body.classList.add("light");
     // This check only compares location signals, so its controls should not
     // imply that iOS cannot identify a software-simulated position.
     $("btn-stealth").title = "Location consistency guide";
     $("btn-stealth").setAttribute("aria-label", "Open location consistency guide");
-    $("status-stealth-text").textContent = "CHECK NOT RUN";
+    $("status-stealth-text").textContent = "Check not run";
     $("status-stealth-dot").className = "status-dot";
     $("status-stealth").title = "Compares the simulated location, IP-based location, and approximate timezone";
     if (!localStorage.getItem("ob_done")) {
@@ -202,7 +213,6 @@ document.addEventListener("DOMContentLoaded", async () => {
         }
     } catch (e) {}
 
-    darkTiles = !lightTheme;
     map = L.map("map", { zoomControl: false }).setView([startLat, startLon], startZoom);
     tileLayer = createMapTiles(darkTiles).addTo(map);
     map.on("click", onMapClick);
@@ -294,7 +304,6 @@ document.addEventListener("DOMContentLoaded", async () => {
     $("search-input").addEventListener("focus", () => {
         if ($("search-results").children.length > 0) $("search-results").classList.add("visible");
     });
-    $("btn-theme").addEventListener("click", toggleTheme);
     $("btn-coord-fmt").addEventListener("click", toggleCoordFormat);
 
     // Joystick
@@ -484,7 +493,7 @@ function togglePanel(panelId) {
     const p = $(panelId); if (!p) return;
     p.classList.toggle("collapsed");
     const collapsed = p.classList.contains("collapsed");
-    const name = (p.querySelector(".hud-panel-header > span")?.textContent || "panel").toLowerCase();
+    const name = (p.querySelector(".hud-panel-header > span:not(.hud-panel-icon)")?.textContent || "panel").toLowerCase();
     p.querySelectorAll(".hud-panel-close").forEach(btn => {
         btn.setAttribute("aria-label", (collapsed ? "Expand " : "Collapse ") + name + " panel");
     }); localStorage.setItem("panel_" + panelId, p.classList.contains("collapsed") ? "collapsed" : "open"); positionPlacesPanel(); }
@@ -540,10 +549,20 @@ function obSkip() { localStorage.setItem("ob_done", "1"); $("onboarding").classL
 function obDone() { if ($("ob-dismiss").checked) localStorage.setItem("ob_done", "1"); $("onboarding").classList.add("hidden"); }
 
 // ── Toasts ──────────────────────────────────────────────────
-function toast(msg, type = "success") { const dur = type === "warning" ? 5000 : 3000; const el = document.createElement("div"); el.className = "toast " + type; el.textContent = msg; $("toasts").appendChild(el); setTimeout(() => { el.classList.add("out"); setTimeout(() => el.remove(), 300); }, dur); }
-
-// ── Theme ───────────────────────────────────────────────────
-function toggleTheme() { lightTheme = !lightTheme; document.body.classList.toggle("light", lightTheme); localStorage.setItem("theme", lightTheme ? "light" : "dark"); darkTiles = !lightTheme; map.removeLayer(tileLayer); tileLayer = createMapTiles(darkTiles).addTo(map); }
+function toast(msg, type = "success") {
+    const dur = type === "warning" || type === "error" ? 5000 : 3000;
+    const el = document.createElement("div");
+    el.className = "toast " + type;
+    const mark = document.createElement("span");
+    mark.className = "toast-mark";
+    const text = document.createElement("span");
+    text.textContent = msg;
+    el.append(mark, text);
+    $("toasts").appendChild(el);
+    // Keep the stack short: a burst of events should not wallpaper the map.
+    while ($("toasts").children.length > 4) $("toasts").firstElementChild.remove();
+    setTimeout(() => { el.classList.add("out"); setTimeout(() => el.remove(), 260); }, dur);
+}
 
 // ── Coord format ────────────────────────────────────────────
 function toggleCoordFormat() {
@@ -564,8 +583,7 @@ function syncReadoutFromInputs() {
     const latRaw = $("lat-input").value.trim();
     const lonRaw = $("lon-input").value.trim();
     if (!latRaw && !lonRaw) {
-        readout.textContent = "Click the map to set a location";
-        readout.classList.remove("coord-glow");
+        renderReadout(null);
         lastCoords = null;
         return;
     }
@@ -574,9 +592,34 @@ function syncReadoutFromInputs() {
     // rather than showing something wrong.
     if (coordFormat !== "dd" || Number.isNaN(lat) || Number.isNaN(lon)) return;
     if (Math.abs(lat) > 90 || Math.abs(lon) > 180) return;
-    readout.textContent = lat.toFixed(6) + ", " + lon.toFixed(6);
-    readout.classList.add("coord-glow");
+    renderReadout(lat, lon);
     lastCoords = { lat, lng: lon };
+}
+
+// The readout is the one loud thing on screen: each axis on its own line with
+// its hemisphere, the way a receiver displays a fix.
+function renderReadout(lat, lng) {
+    const readout = $("coord-text");
+    if (!readout) return;
+    readout.textContent = "";
+    if (lat == null || lng == null) {
+        readout.textContent = "Click the map to set a location";
+        readout.classList.remove("coord-glow");
+        return;
+    }
+    [[lat, lat >= 0 ? "N" : "S"], [lng, lng >= 0 ? "E" : "W"]].forEach(([value, hemisphere]) => {
+        const line = document.createElement("span");
+        line.className = "readout-line";
+        const number = document.createElement("span");
+        number.className = "readout-num";
+        number.textContent = Math.abs(value).toFixed(6) + "\u00B0";
+        const hemi = document.createElement("span");
+        hemi.className = "readout-hemi";
+        hemi.textContent = hemisphere;
+        line.append(number, hemi);
+        readout.appendChild(line);
+    });
+    readout.classList.add("coord-glow");
 }
 
 
@@ -589,10 +632,10 @@ function applyCoordInputType() {
 
 function updateCoordInputs(lat, lng) {
     lastCoords = { lat, lng };
-    applyCoordInputType(); if (coordFormat === "dms") { $("lat-input").value = toDMS(lat, false); $("lon-input").value = toDMS(lng, true); } else { $("lat-input").value = lat.toFixed(6); $("lon-input").value = lng.toFixed(6); } if ($("coord-text")) { $("coord-text").textContent = lat.toFixed(6) + ", " + lng.toFixed(6); $("coord-text").classList.add("coord-glow"); } }
+    applyCoordInputType(); if (coordFormat === "dms") { $("lat-input").value = toDMS(lat, false); $("lon-input").value = toDMS(lng, true); } else { $("lat-input").value = lat.toFixed(6); $("lon-input").value = lng.toFixed(6); } renderReadout(lat, lng); }
 
 // ── Teleport ────────────────────────────────────────────────
-function toggleTeleport() { teleportMode = !teleportMode; $("btn-teleport").classList.toggle("active", teleportMode); toast(teleportMode ? "Teleport ON \u2014 click map to move instantly" : "Teleport OFF", teleportMode ? "success" : "error"); }
+function toggleTeleport() { teleportMode = !teleportMode; $("btn-teleport").classList.toggle("active", teleportMode); $("btn-teleport").setAttribute("aria-pressed", String(teleportMode)); toast(teleportMode ? "Teleport on \u2014 click the map to move instantly" : "Teleport off", teleportMode ? "success" : "info"); }
 
 // ── Shortcuts ───────────────────────────────────────────────
 function toggleShortcuts() { $("shortcuts-overlay").classList.toggle("hidden"); }
@@ -632,13 +675,13 @@ function goToUserLocation() {
 }
 
 function placeMarker(lat, lng) {
-    const icon = L.divIcon({ className: "map-marker-container", html: '<div class="map-marker"><div class="map-marker-pulse"></div><div class="map-marker-dot"></div></div>', iconSize: [20, 20], iconAnchor: [10, 10] });
+    const icon = L.divIcon({ className: "map-marker-container", html: PIN_ICON_HTML, iconSize: [30, 40], iconAnchor: [15, 38] });
     if (marker) { marker.setLatLng([lat, lng]); } else { marker = L.marker([lat, lng], { icon: icon }).addTo(map); }
     trailPoints.push([lat, lng]); if (trailPoints.length > 20) trailPoints.shift();
     updateCoordInputs(lat, lng); updateStatusBar();
 }
 
-function toggleTiles() { darkTiles = !darkTiles; map.removeLayer(tileLayer); tileLayer = createMapTiles(darkTiles).addTo(map); }
+function toggleTiles() { darkTiles = !darkTiles; localStorage.setItem("map_style", darkTiles ? "night" : "day"); map.removeLayer(tileLayer); tileLayer = createMapTiles(darkTiles).addTo(map); }
 
 // ── Teleport to ─────────────────────────────────────────────
 function coordsInRange(lat, lon) {
@@ -664,7 +707,7 @@ async function setLocation() {
 }
 
 async function clearLocation() {
-    try { const r = await fetch("/api/location/clear", { method: "POST" }); if (r.ok) { activeSpoofLocation = null; toast("Reset to real GPS"); if (marker) { map.removeLayer(marker); marker = null; } $("lat-input").value = ""; $("lon-input").value = ""; if ($("coord-text")) { $("coord-text").textContent = "Click the map to set a location"; $("coord-text").classList.remove("coord-glow"); } if (startupLocation) goToUserLocation(); _stealthDismissed = false; await checkStealth(); } else { const d = await r.json().catch(() => ({})); toast(d.error || "Failed to reset", "error"); } } catch (e) { toast("Connection error", "error"); }
+    try { const r = await fetch("/api/location/clear", { method: "POST" }); if (r.ok) { activeSpoofLocation = null; toast("Reset to real GPS"); if (marker) { map.removeLayer(marker); marker = null; } $("lat-input").value = ""; $("lon-input").value = ""; renderReadout(null); if (startupLocation) goToUserLocation(); _stealthDismissed = false; await checkStealth(); } else { const d = await r.json().catch(() => ({})); toast(d.error || "Failed to reset", "error"); } } catch (e) { toast("Connection error", "error"); }
 }
 
 // ── Undo ────────────────────────────────────────────────────
@@ -871,7 +914,7 @@ async function pollDevice() {
             setReadinessValue("dev-ddi", "Unavailable", "error");
             setReadinessValue("dev-tunnel", "Unavailable", "error");
             $("device-info-compact")?.classList.add("hidden"); $("setup-guide")?.classList.remove("hidden");
-            if ($("status-conn-text")) $("status-conn-text").textContent = "--"; wasConnected = false;
+            if ($("status-conn-text")) $("status-conn-text").textContent = "No iPhone"; wasConnected = false;
             // Auto-connect on first poll if tunnel is running
             if (!_autoConnectAttempted && !d.connecting) { _autoConnectAttempted = true; autoConnect(); }
         }
@@ -915,11 +958,11 @@ async function toggleDeviceDropdown() {
             ["Developer Image", info.ddi_mounted === true ? "Mounted" : "Missing", info.ddi_mounted === true],
             ["Tunnel", info.tunnel_mode === "userspace" ? "Userspace" : (info.tunnel_mode === "tunneld" ? "Root fallback" : "Unavailable"), Boolean(info.tunnel_mode)]
         ] : [["Device", "Not connected", false]];
-        const heading = document.createElement("div"); heading.className = "device-dropdown-heading"; heading.textContent = "ACTIVE DEVICE"; active.appendChild(heading);
+        const heading = document.createElement("div"); heading.className = "device-dropdown-heading"; heading.textContent = "Active device"; active.appendChild(heading);
         statusItems.forEach(([label, value, ok]) => { const row = document.createElement("div"); row.className = "device-readiness-row"; const l = document.createElement("span"); l.textContent = label; const v = document.createElement("span"); v.className = "readiness-value " + (ok ? "ready" : "error"); v.textContent = value; row.append(l, v); active.appendChild(row); });
         list.appendChild(active);
-        const availableHeading = document.createElement("div"); availableHeading.className = "device-dropdown-heading available"; availableHeading.textContent = "AVAILABLE DEVICES"; list.appendChild(availableHeading);
-        if (!devices.length) { const e = document.createElement("div"); e.className = "empty-state"; e.style.padding = "10px"; e.textContent = "No devices found"; list.appendChild(e); }
+        const availableHeading = document.createElement("div"); availableHeading.className = "device-dropdown-heading available"; availableHeading.textContent = "Available devices"; list.appendChild(availableHeading);
+        if (!devices.length) { const e = document.createElement("div"); e.className = "empty-state"; e.textContent = "No devices found"; list.appendChild(e); }
         else { devices.forEach(dev => { const opt = document.createElement("div"); opt.className = "device-option"; const u = document.createElement("span"); u.className = "mono"; u.textContent = maskUdid(dev.udid); opt.appendChild(u); dev.connection_types.forEach(t => { const b = document.createElement("span"); b.className = "conn-badge " + t.toLowerCase(); b.textContent = t; opt.appendChild(b); }); opt.addEventListener("click", async () => { await connectDevice(false, dev.udid); dd.classList.add("hidden"); }); list.appendChild(opt); }); }
         const badge = $("device-badge"), rect = badge.getBoundingClientRect();
         dd.style.top = (rect.bottom + 4) + "px"; dd.style.right = (window.innerWidth - rect.right) + "px";
@@ -951,7 +994,7 @@ function showSaveForm() {
 async function confirmSaveLocation() { const name = $("save-name").value.trim(); if (!name) return toast("Enter a name", "error"); const lat = parseFloat($("lat-input").value), lon = parseFloat($("lon-input").value); if (!coordsInRange(lat, lon)) return toast("Choose a valid location before saving", "error"); const cat = document.querySelector(".cat-pill.active")?.dataset.cat || "default"; try { const r = await fetch("/api/saved", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ name, lat, lon, category: cat }) }); if (r.ok) { loadSaved(); setPlacesTab("saved"); toast('Saved "' + name + '"'); $("save-form").classList.add("hidden"); } else { const d = await r.json(); toast(d.error || "Failed", "error"); } } catch (e) { toast("Connection error", "error"); } }
 
 // ── Route / Movement ────────────────────────────────────────
-function addRoutePoint(lat, lng, preserveCalculated = false) { if (!preserveCalculated) { calculatedRouteCoordinates = null; calculatedRouteProvider = null; calculatedRouteSummary = null; calculatedRouteHolds = null; } routePoints.push({ lat, lng }); const m = L.circleMarker([lat, lng], { radius: 6, color: "#6F999A", fillColor: "#6F999A", fillOpacity: 1, weight: 0 }).addTo(map); m.bindTooltip(String(routePoints.length), { permanent: true, direction: "center", className: "route-label" }); routeMarkers.push(m); if (routePoints.length >= 2) { if (routeLine) map.removeLayer(routeLine); routeLine = L.polyline(routePoints.map(p => [p.lat, p.lng]), { color: "#6F999A", weight: 2, dashArray: "8 6", opacity: 0.6 }).addTo(map); } updateRouteUI(); }
+function addRoutePoint(lat, lng, preserveCalculated = false) { if (!preserveCalculated) { calculatedRouteCoordinates = null; calculatedRouteProvider = null; calculatedRouteSummary = null; calculatedRouteHolds = null; } routePoints.push({ lat, lng }); const m = L.circleMarker([lat, lng], { radius: 6, color: MAP_INK.draft, fillColor: MAP_INK.draft, fillOpacity: 1, weight: 0 }).addTo(map); m.bindTooltip(String(routePoints.length), { permanent: true, direction: "center", className: "route-label" }); routeMarkers.push(m); if (routePoints.length >= 2) { if (routeLine) map.removeLayer(routeLine); routeLine = L.polyline(routePoints.map(p => [p.lat, p.lng]), { color: MAP_INK.draft, weight: 2, dashArray: "6 7", opacity: 0.7 }).addTo(map); } updateRouteUI(); }
 // Drawing a calculated route replaces the geometry but must not throw away
 // the itinerary that produced it.
 function clearRouteGeometry() {
@@ -1189,7 +1232,7 @@ function renderStopsOnMap(fit = false) {
 
     placed.forEach(({ stop, index }) => {
         const marker = L.circleMarker([stop.place.lat, stop.place.lon], {
-            radius: 8, color: "#79C2B8", fillColor: "#79C2B8", fillOpacity: 1, weight: 0,
+            radius: 9, color: "#0B111B", fillColor: MAP_INK.path, fillOpacity: 1, weight: 2,
         }).addTo(map);
         marker.bindTooltip(stopLabel(index), {
             permanent: true, direction: "center", className: "route-label",
@@ -1204,7 +1247,7 @@ function renderStopsOnMap(fit = false) {
         const line = placed.map(e => [e.stop.place.lat, e.stop.place.lon]);
         if (closeLoop && placed.length >= 2) line.push(line[0]);
         stopLine = L.polyline(line, {
-            color: "#79C2B8", weight: 2, dashArray: "7 6", opacity: 0.65,
+            color: MAP_INK.path, weight: 2, dashArray: "6 7", opacity: 0.6,
         }).addTo(map);
     }
 
@@ -1380,8 +1423,8 @@ function renderRoamArea() {
     if (!roamCentre || !radius) return;
     roamCircle = L.circle([roamCentre.lat, roamCentre.lon], {
         radius,
-        color: "#79C2B8", weight: 2, dashArray: "7 6", opacity: 0.7,
-        fillColor: "#79C2B8", fillOpacity: 0.07,
+        color: MAP_INK.path, weight: 1.5, dashArray: "6 7", opacity: 0.75,
+        fillColor: MAP_INK.path, fillOpacity: 0.06,
     }).addTo(map);
 }
 
@@ -1639,7 +1682,7 @@ function updateRoamLookahead(lat, lon) {
     }
     if (roamPathLine) roamPathLine.setLatLngs(tail);
     else roamPathLine = L.polyline(tail,
-        { color: "#79C2B8", weight: 3, opacity: 0.7, dashArray: "7 7" }).addTo(map);
+        { color: MAP_INK.path, weight: 3, opacity: 0.7, dashArray: "6 7" }).addTo(map);
 }
 
 // When one stretch of road runs out, quietly lay out another so roaming keeps
@@ -1905,7 +1948,7 @@ function drawCalculatedRoute(data, label) {
             .map(index => [index, "waypoint"])
         : null;
     if (routeLine) { map.removeLayer(routeLine); routeLine = null; }
-    routeDisplayLine = L.polyline(data.coordinates.map(c => [c[1], c[0]]), { color: "#6F999A", weight: 3, opacity: 0.78 }).addTo(map);
+    routeDisplayLine = L.polyline(data.coordinates.map(c => [c[1], c[0]]), { color: MAP_INK.path, weight: 4, opacity: 0.55, lineCap: "round", lineJoin: "round" }).addTo(map);
     map.fitBounds(routeDisplayLine.getBounds(), { padding: [35, 35] });
     updateRouteUI();
     // After updateRouteUI, which writes its own generic hint.
@@ -1978,7 +2021,7 @@ async function startRoute() {
     if (d.coordinates) {
         if (routeLine) { map.removeLayer(routeLine); routeLine = null; }
         if (routeDisplayLine) map.removeLayer(routeDisplayLine);
-        routeDisplayLine = L.polyline(d.coordinates.map(c => [c[1], c[0]]), { color: "#6F999A", weight: 3, opacity: 0.78 }).addTo(map);
+        routeDisplayLine = L.polyline(d.coordinates.map(c => [c[1], c[0]]), { color: MAP_INK.path, weight: 4, opacity: 0.55, lineCap: "round", lineJoin: "round" }).addTo(map);
     }
     followMode = true;
     if ($("follow-mode")) $("follow-mode").checked = true;
@@ -2020,7 +2063,7 @@ function drawTravelled(pct) {
     const upto = Math.max(2, Math.round(coords.length * (pct / 100)));
     const path = coords.slice(0, upto).map(c => [c[1], c[0]]);
     if (routeTraveledLine) { routeTraveledLine.setLatLngs(path); return; }
-    routeTraveledLine = L.polyline(path, { color: "#EAF2EC", weight: 4, opacity: 0.9 }).addTo(map);
+    routeTraveledLine = L.polyline(path, { color: MAP_INK.travelled, weight: 5, opacity: 0.95, lineCap: "round", lineJoin: "round" }).addTo(map);
 }
 
 // A short rolling history of driven speed (km/h) so the readout can tell that
@@ -2229,10 +2272,10 @@ function joystickStop() {
 // ── Cooldown ────────────────────────────────────────────────
 async function pollCooldown() {
     try { const r = await fetch("/api/cooldown"); const d = await r.json(); const badge = $("cooldown-badge"), timeEl = $("cooldown-time"), bar = $("cooldown-bar");
-    if (d.active) { const mins = Math.floor(d.remaining_seconds / 60), secs = d.remaining_seconds % 60; timeEl.textContent = String(mins).padStart(2, "0") + ":" + String(secs).padStart(2, "0"); const pct = d.total_seconds > 0 ? ((d.total_seconds - d.remaining_seconds) / d.total_seconds * 100) : 0; bar.style.width = pct + "%"; badge.textContent = "WAIT"; badge.className = "cooldown-badge active"; badge.classList.remove("hidden"); }
-    else { timeEl.textContent = "00:00"; bar.style.width = "100%"; badge.textContent = "SAFE"; badge.className = "cooldown-badge"; badge.classList.remove("hidden"); }
-    if ($("status-cooldown-text")) { $("status-cooldown-text").textContent = d.active ? "WAIT" : "SAFE"; $("status-cooldown-text").style.color = d.active ? "var(--red)" : "var(--green)"; }
-    if ($("status-dot")) $("status-dot").classList.toggle("connected", !d.active);
+    if (d.active) { const mins = Math.floor(d.remaining_seconds / 60), secs = d.remaining_seconds % 60; timeEl.textContent = String(mins).padStart(2, "0") + ":" + String(secs).padStart(2, "0"); const pct = d.total_seconds > 0 ? ((d.total_seconds - d.remaining_seconds) / d.total_seconds * 100) : 0; bar.style.width = pct + "%"; badge.textContent = "Wait"; badge.className = "cooldown-badge active"; badge.classList.remove("hidden"); }
+    else { timeEl.textContent = "00:00"; bar.style.width = "100%"; badge.textContent = "Safe"; badge.className = "cooldown-badge"; badge.classList.remove("hidden"); }
+    if ($("status-cooldown-text")) $("status-cooldown-text").textContent = d.active ? "Cooldown " + timeEl.textContent : "Safe to move";
+    if ($("status-dot")) $("status-dot").className = "status-dot " + (d.active ? "degraded" : "connected");
     } catch (e) {}
 }
 
@@ -2277,16 +2320,16 @@ async function checkStealth() {
 
         if (stealthPill) {
             if (!checkAvailable) {
-                stealthText.textContent = d.unavailable_reason === "no_location" ? "CHECK NOT RUN" : "CHECK UNAVAILABLE";
+                stealthText.textContent = d.unavailable_reason === "no_location" ? "Check not run" : "Check unavailable";
                 stealthDot.className = "status-dot degraded";
                 stealthPill.title = "Location consistency check could not run";
             } else if (!warnings.length) {
-                stealthText.textContent = "LOCATION CONSISTENT";
+                stealthText.textContent = "Location consistent";
                 stealthDot.className = "status-dot connected";
                 stealthPill.title = "Simulated location, IP-based location, and approximate timezone are consistent; this does not test iOS simulation flags";
             } else {
                 const hasHigh = warnings.some(w => w.severity === "high");
-                stealthText.textContent = hasHigh ? "LOCATION MISMATCH" : "CHECK WARNING";
+                stealthText.textContent = hasHigh ? "Location mismatch" : "Check warning";
                 stealthDot.className = "status-dot degraded";
                 stealthPill.title = "The location consistency check found a mismatch; this does not test iOS simulation flags";
             }
@@ -2305,7 +2348,7 @@ async function checkStealth() {
         banner.classList.remove("hidden");
         banner.className = "stealth-banner-" + sorted[0].severity;
     } catch (e) {
-        if ($("status-stealth-text")) $("status-stealth-text").textContent = "CHECK UNAVAILABLE";
+        if ($("status-stealth-text")) $("status-stealth-text").textContent = "Check unavailable";
         if ($("status-stealth-dot")) $("status-stealth-dot").className = "status-dot degraded";
         if ($("status-stealth")) $("status-stealth").title = "Location consistency check could not run";
     }
