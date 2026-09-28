@@ -36,6 +36,8 @@ remain active until reset or the developer connection ends.
   inside it at random, indefinitely
 - **Adaptive speed** that follows posted limits from OpenStreetMap and eases
   off at stop signs and traffic signals
+- Smooth acceleration, braking, and rounded turns; up to 20 location updates
+  per second with automatic adjustment to the device connection
 - WASD/arrow-key joystick control
 - Saved and recent locations, profiles, schedules, and route history
 - Multi-device selection over USB or paired Wi-Fi

@@ -59,6 +59,15 @@ const tick=()=>new Promise(resolve=>setImmediate(resolve));
  // A device name containing "connect" is still a ready device.
  run('$("device-label").textContent="Connected iPhone"; currentDeviceInfo={connected:true};');
  assert.equal(run('deviceReady()'),true);
+ // Preview follows the backend's accepted path even where the route crosses itself.
+ let drawn, style;
+ context.L={polyline:(points,options)=>{drawn=points;style=options;return {addTo(){return this},setLatLngs(points){drawn=points}}}};
+ run('roamPathLine=null; roamChunkIdx=0; roamChunkCoords=[[2.30,48.86],[2.31,48.86],[2.30,48.86]];');
+ run('updateRoamLookahead(48.86,2.30,[[2.30,48.86],[2.3001,48.86],[2.3002,48.8601]],0)');
+ assert.equal(run('roamChunkIdx'),0);
+ assert.equal(JSON.stringify(drawn),JSON.stringify([[48.86,2.30],[48.86,2.3001],[48.8601,2.3002]]));
+ assert.equal(style.dashArray,undefined);
+ assert.equal(style.smoothFactor,0);
  run('cancelMovementUI()');
- console.log('PASS: pending roam cancellation, reset, stale position/prefetch, joystick handoff, device readiness.');
+ console.log('PASS: pending roam cancellation, reset, stale position/prefetch, joystick handoff, device readiness, driven-path preview.');
 })().catch(error=>{console.error(error);process.exitCode=1});

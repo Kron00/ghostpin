@@ -29,33 +29,74 @@ MAX_LATERAL_MS2 = 3.0
 MIN_CORNER_KMH = 8.0
 SPEED_JITTER_TAU_S = 8.0
 SPEED_JITTER_SD = 0.07
-SPEED_JITTER_CLAMP = (0.85, 1.15)
+SPEED_JITTER_CLAMP = (0.90, 1.0)
 # These track-relative noise defaults are provisional: correlated error is
 # well-supported, but its exact magnitude and anisotropy are device-dependent.
 GPS_NOISE_TAU_S = 20.0
-GPS_NOISE_SD_CROSS_M = 1.5
-GPS_NOISE_SD_ALONG_M = 1.0
+GPS_NOISE_SD_CROSS_M = 0.6
+GPS_NOISE_SD_ALONG_M = 0.3
+GPS_NOISE_SMOOTH_S = 2.0
+GPS_NOISE_MAX_DRIFT_MS = 0.15
 
-# Ten hertz is a display-oriented cap for a channel that cannot provide motion
-# metadata. Wi-Fi pressure permanently selects the safer five-hertz schedule.
+# The DVT channel carries coordinates only. Use frequent small fixes when the
+# transport can sustain them; choose a slower cadence from recent write timing.
 EMIT_MIN_HZ = 1.0
-EMIT_MAX_HZ = 10.0
+EMIT_MAX_HZ = 20.0
 EMIT_FALLBACK_HZ = 5.0
 EMIT_MIN_MOVEMENT_M = 0.02
-EMIT_WRITE_P99_LIMIT_S = 0.080
-EMIT_LOSS_LIMIT = 0.01
-# A slow DVT write must make the route late, not make the next fix catch up by
-# several seconds in one visible leap. At the fastest normal road profile this
-# caps a recovery step at roughly 22 m before the small GPS-noise component.
-MAX_ROUTE_ADVANCE_S = 0.75
+EMIT_HEALTH_WINDOW = 60
+EMIT_HEALTH_INTERVAL = 20
+EMIT_RECOVERY_WRITES = 80
+# A stalled transport slows the trip. It never creates catch-up distance.
+MAX_ROUTE_ADVANCE_PERIODS = 1.5
 DRIVEN_PATH_SPACING_M = 5.0
 MAX_DRIVEN_PATH_POINTS = 25000
 
-# Realistic driving sits a random amount over the posted limit — never under,
-# because effectively no one does. One offset per trip, like a driver's habit.
-OVER_LIMIT_MIN_MPH = 1.0
-OVER_LIMIT_MAX_MPH = 15.0
 MPH_TO_KMH = 1.609344
+
+
+def _sustainable_emit_rate(latencies, cap):
+    recent = sorted(latencies[-EMIT_HEALTH_WINDOW:])
+    if not recent:
+        return cap
+    p90 = recent[max(0, math.ceil(len(recent) * 0.9) - 1)]
+    sustainable = 1 / max(0.001, p90 * 1.25)
+    candidates = [rate for rate in (5.0, 8.0, 10.0, 15.0, 20.0)
+                  if rate <= sustainable and rate <= cap]
+    return max(candidates, default=min(5.0, cap))
+
+
+def _movement_ticks(active):
+    """Absolute deadlines for free movement; transport stalls never accrue debt."""
+    rate = EMIT_MAX_HZ
+    last = time.monotonic()
+    deadline = last + 1 / rate
+    latencies = []
+    count = recovery_at = 0
+    while active():
+        while active() and time.monotonic() < deadline:
+            time.sleep(min(.02, max(0, deadline - time.monotonic())))
+        if not active():
+            return
+        now = time.monotonic()
+        elapsed = min(MAX_ROUTE_ADVANCE_PERIODS / rate, max(0, now - last))
+        last = now
+        yield elapsed
+        finished = time.monotonic()
+        latencies.append(finished - now)
+        latencies = latencies[-EMIT_HEALTH_WINDOW:]
+        count += 1
+        previous_rate = rate
+        if count % EMIT_HEALTH_INTERVAL == 0:
+            target = _sustainable_emit_rate(latencies, EMIT_MAX_HZ)
+            if target < rate:
+                rate, recovery_at = target, count + EMIT_RECOVERY_WRITES
+            elif count >= recovery_at:
+                rate = target
+        if previous_rate != rate:
+            deadline = finished + 1 / rate
+        else:
+            deadline += max(1, math.floor((finished - deadline) * rate) + 1) / rate
 
 
 def _get_data_dir():
@@ -128,6 +169,7 @@ class LocationService:
         self._route_emit_max_hz = EMIT_MAX_HZ
         self._route_emit_target_hz = EMIT_MAX_HZ
         self._route_emit_degraded = False
+        self._route_emit_recovery_at = 0
         self._route_emit_hz = 0
 
         self._route_emit_times = []
@@ -147,6 +189,7 @@ class LocationService:
         self._route_generation = 0
         self._route_pass_key = "forward"
         self._route_pass_distance = 0
+        self._route_fix_snapshot = None
 
         # Joystick state
         self._joystick_active = False
@@ -263,8 +306,25 @@ class LocationService:
         self._last_teleport_coords = None
         return {"status": "Location cleared"}
 
-    def get_current(self):
-        return self.current_location
+    def get_current(self, include_route=False):
+        location = self.current_location
+        snapshot = self._route_fix_snapshot
+        if not include_route or location is None or snapshot is None:
+            return location
+        generation, accepted_location, plan, state = snapshot
+        if (not self._route_active or generation != self._route_generation
+                or accepted_location is not location):
+            return location
+        end_distance = min(plan["total_distance"], state["distance"] + 400.0)
+        preview = [[location["lon"], location["lat"]]]
+        for index in range(state["segment"] + 1, len(plan["points"])):
+            if plan["cumulative_distance"][index] >= end_distance:
+                end = self._plan_state_at_time(plan, self._plan_time_at_distance(plan, end_distance))
+                preview.append([end["lon"], end["lat"]])
+                break
+            preview.append(plan["points"][index])
+        return {**location, "route_preview": preview,
+                "route_coordinate_index": plan["origins"][state["segment"]]}
 
     # ── Cooldown ───────────────────────────────────────────
 
@@ -377,36 +437,36 @@ class LocationService:
         """Stop joystick movement."""
         self._joystick_active = False
         if self._joystick_thread and self._joystick_thread.is_alive():
-            self._joystick_thread.join(timeout=2)
+            self._joystick_thread.join(timeout=7)
         self._joystick_thread = None
         if self.current_location:
             self._start_keepalive()
         return {"status": "Stopped"}
 
     def _joystick_loop(self):
-        TICK = 0.2  # 200ms per tick
-        while self._joystick_active and self.current_location:
-            d = self._DIRECTIONS.get(self._joystick_direction, (0, 0))
-            lat = self.current_location["lat"]
-            lon = self.current_location["lon"]
-
-            # Convert speed to degrees per tick
-            speed_deg = self._joystick_speed / (111.32 * 3600) * TICK
-            # Normalize diagonal so it's not faster
-            mag = math.sqrt(d[0] ** 2 + d[1] ** 2) or 1
-            dlat = d[0] / mag * speed_deg
-            # Longitude correction for latitude
-            dlon = d[1] / mag * speed_deg / max(math.cos(math.radians(lat)), 0.01)
-
-            new_lat = max(-90, min(90, lat + dlat))
-            new_lon = max(-180, min(180, lon + dlon))
-
+        north_speed = east_speed = 0.0
+        for elapsed in _movement_ticks(lambda: self._joystick_active and self.current_location):
+            north, east = self._DIRECTIONS.get(self._joystick_direction, (0, 0))
+            magnitude = math.hypot(north, east) or 1.0
+            target_speed = self._joystick_speed / 3.6
+            delta_north = north / magnitude * target_speed - north_speed
+            delta_east = east / magnitude * target_speed - east_speed
+            delta = math.hypot(delta_north, delta_east)
+            blend = min(1.0, MAX_ACCEL_MS2 * elapsed / delta) if delta else 0.0
+            next_north = north_speed + delta_north * blend
+            next_east = east_speed + delta_east * blend
+            cur = self.current_location
+            lat = max(-90, min(90, cur["lat"]
+                      + (north_speed + next_north) * 0.5 * elapsed / 111320))
+            lon = self._wrap_longitude(cur["lon"]
+                      + (east_speed + next_east) * 0.5 * elapsed
+                      / (111320 * max(math.cos(math.radians(cur["lat"])), 0.01)))
             try:
-                self._sim_set(new_lat, new_lon)
-                self.current_location = {"lat": new_lat, "lon": new_lon}
+                self._sim_set(lat, lon, timeout=6)
+                self.current_location = {"lat": lat, "lon": lon}
+                north_speed, east_speed = next_north, next_east
             except Exception:
                 pass
-            time.sleep(TICK)
 
     # ── Movement / Routes ──────────────────────────────────
 
@@ -451,7 +511,7 @@ class LocationService:
             raise ValueError("Speed must be between 1 and 300 km/h")
         emit_cap = float(emit_max_hz)
         if not EMIT_MIN_HZ <= emit_cap <= EMIT_MAX_HZ:
-            raise ValueError("Emission rate cap must be between 1 and 10 Hz")
+            raise ValueError("Emission rate cap must be between 1 and 20 Hz")
 
         if coordinates is not None:
             if not isinstance(coordinates, list) or not (2 <= len(coordinates) <= 20000):
@@ -537,13 +597,10 @@ class LocationService:
                 # One target speed per segment when the caller worked out a
                 # profile from posted limits; otherwise one speed governs all.
                 self._route_speeds = profile
-                # Realistic mode drives a random 1-15 mph over every posted
-                # limit, fixed for the trip. Flat mode has no profile and no
-                # offset.
-                self._route_over_limit_kmh = (
-                    random.uniform(OVER_LIMIT_MIN_MPH, OVER_LIMIT_MAX_MPH) * MPH_TO_KMH
-                    if profile else 0.0
-                )
+                # A posted limit is a ceiling, not a reason to add an arbitrary
+                # speeding offset. Corners, stops and optional pace variation
+                # can lower the actual speed further.
+                self._route_over_limit_kmh = 0.0
                 self._route_posted_limit_kmh = profile[0] if profile else None
                 self._route_holds = normalized_holds
                 self._route_error = None
@@ -554,6 +611,7 @@ class LocationService:
                 self._route_emit_max_hz = emit_cap
                 self._route_emit_target_hz = emit_cap
                 self._route_emit_degraded = False
+                self._route_emit_recovery_at = 0
                 self._route_emit_hz = 0
                 self._route_emit_times = []
                 self._route_write_latencies = []
@@ -625,6 +683,10 @@ class LocationService:
                 continue
 
             cutback = min(0.25 * incoming_length, 0.25 * outgoing_length, 12.0)
+            curve_budget = MAX_DRIVEN_PATH_POINTS - len(points) - (len(coordinates) - index)
+            if curve_budget < 4:
+                append_point(corner, index)
+                continue
             before_fraction = 1 - cutback / incoming_length
             after_fraction = cutback / outgoing_length
             before = self._interpolate_coordinate(
@@ -634,11 +696,13 @@ class LocationService:
                 corner, following, after_fraction
             )
             append_point(before, index - 1)
-            # A handful of points is enough to make the heading rotate instead
-            # of snap without exploding long, nearly straight road geometry.
+            # Sample rounded turns at roughly one metre so close-up movement
+            # rotates through the bend instead of tracing four visible chords.
             before_lon = corner[0] + self._longitude_delta(corner[0], before[0])
             after_lon = corner[0] + self._longitude_delta(corner[0], after[0])
-            for fraction in (0.25, 0.5, 0.75, 1.0):
+            curve_steps = min(curve_budget, max(4, math.ceil(2 * cutback)))
+            for step in range(1, curve_steps + 1):
+                fraction = step / curve_steps
                 inverse = 1 - fraction
                 rounded = [
                     self._wrap_longitude(
@@ -1187,6 +1251,8 @@ class LocationService:
         distance = max(0.0, min(distance, plan["total_distance"]))
         if not plan["segments"]:
             return 0.0
+        if distance >= plan["total_distance"]:
+            return plan["movement_duration"]
         index = min(
             len(plan["segments"]) - 1,
             max(0, bisect.bisect_right(plan["cumulative_distance"], distance) - 1),
@@ -1211,34 +1277,27 @@ class LocationService:
         return ordered[index]
 
     def _update_route_emit_health(self):
-        if self._route_emit_degraded:
-            return
-        failure_rate = (
-            self._route_write_failures_total / self._route_write_attempts
-            if self._route_write_attempts else 0.0
-        )
-        coalesced_rate = (
-            self._route_emit_coalesced / self._route_emit_deadlines
-            if self._route_emit_deadlines else 0.0
-        )
-        if (self._route_write_p99() > EMIT_WRITE_P99_LIMIT_S
-                or failure_rate > EMIT_LOSS_LIMIT
-                or coalesced_rate > EMIT_LOSS_LIMIT):
-            # A sticky fallback avoids repeatedly pushing a marginal Wi-Fi
-            # channel back into the condition that made it miss updates.
-            self._route_emit_degraded = True
-            self._route_emit_target_hz = min(
-                self._route_emit_max_hz, EMIT_FALLBACK_HZ
-            )
+        count = self._route_write_attempts
+        if self._route_write_failures:
+            self._route_emit_target_hz = min(self._route_emit_max_hz, EMIT_FALLBACK_HZ)
+            self._route_emit_recovery_at = count + EMIT_RECOVERY_WRITES
+        elif count >= EMIT_HEALTH_INTERVAL and count % EMIT_HEALTH_INTERVAL == 0:
+            target = _sustainable_emit_rate(self._route_write_latencies,
+                                            self._route_emit_max_hz)
+            if target < self._route_emit_target_hz:
+                self._route_emit_target_hz = target
+                self._route_emit_recovery_at = count + EMIT_RECOVERY_WRITES
+            elif count >= self._route_emit_recovery_at:
+                self._route_emit_target_hz = target
+        self._route_emit_degraded = self._route_emit_target_hz < self._route_emit_max_hz
 
     def _record_route_coalesced(self, count):
         if count <= 0:
             return
         self._route_emit_deadlines += count
         self._route_emit_coalesced += count
-        self._update_route_emit_health()
 
-    def _write_route_fix(self, lat, lon, generation, record=True):
+    def _write_route_fix(self, lat, lon, generation, record=True, plan=None, state=None):
         # A route that has been stopped or superseded must never write, even if
         # its thread was parked waiting for the simulation lock when that
         # happened. The generation is re-checked under the lock so a stale fix
@@ -1257,6 +1316,8 @@ class LocationService:
             self._route_write_latencies.append(latency)
             self._route_write_latencies = self._route_write_latencies[-100:]
             self.current_location = {"lat": lat, "lon": lon}
+            if plan is not None and state is not None:
+                self._route_fix_snapshot = (generation, self.current_location, plan, state)
             self._route_write_failures = 0
             if record:
                 self._record_route_emit(finished)
@@ -1312,14 +1373,18 @@ class LocationService:
             return
         decay = math.exp(-elapsed / GPS_NOISE_TAU_S)
         innovation = math.sqrt(max(0.0, 1 - decay ** 2))
-        self._route_noise_along = (
-            decay * self._route_noise_along
-            + GPS_NOISE_SD_ALONG_M * innovation * random.gauss(0, 1)
-        )
-        self._route_noise_across = (
-            decay * self._route_noise_across
-            + GPS_NOISE_SD_CROSS_M * innovation * random.gauss(0, 1)
-        )
+        blend = 1 - math.exp(-elapsed / GPS_NOISE_SMOOTH_S)
+        for axis, deviation in (("along", GPS_NOISE_SD_ALONG_M),
+                                ("across", GPS_NOISE_SD_CROSS_M)):
+            target_name = "_route_noise_target_" + axis
+            value_name = "_route_noise_" + axis
+            target = (decay * getattr(self, target_name, 0.0)
+                      + deviation * innovation * random.gauss(0, 1))
+            value = getattr(self, value_name, 0.0)
+            delta = (target - value) * blend
+            bound = GPS_NOISE_MAX_DRIFT_MS * elapsed
+            setattr(self, target_name, target)
+            setattr(self, value_name, value + max(-bound, min(bound, delta)))
 
     def _route_coordinate(self, plan, state, elapsed, stop_distance):
         self._advance_gps_noise(elapsed)
@@ -1327,7 +1392,12 @@ class LocationService:
             self._route_noise_last_station = state["distance"]
             return state["lat"], state["lon"]
 
-        taper = min(1.0, state["speed"] / 2.0)
+        # Fade smoothly back onto the path before a hold/end so its exact final
+        # fix cannot snap sideways. Smoothstep also avoids a sharp low-speed kink.
+        taper = min(1.0, state["speed"] / 3.0,
+                    1.0 if plan["cyclic"] else state["distance"] / 5.0,
+                    max(0.0, stop_distance - state["distance"]) / 5.0)
+        taper = taper * taper * (3 - 2 * taper)
         along = self._route_noise_along * taper
         across = self._route_noise_across * taper
         station = max(0.0, state["distance"] + along)
@@ -1349,7 +1419,7 @@ class LocationService:
         lon = station_state["lon"] + east_offset / (
             111320 * max(math.cos(math.radians(station_state["lat"])), 0.01)
         )
-        return lat, lon
+        return lat, self._wrap_longitude(lon)
 
     def _future_hold(self, plan, consumed, elapsed):
         for hold in plan["holds"]:
@@ -1413,6 +1483,26 @@ class LocationService:
         self._route_holding = False
         self._route_hold_kind = None
 
+    def _advance_route_motion(self, plan, distance, speed, elapsed, factor, stop_distance,
+                              stop_at_end=True):
+        if elapsed <= 0:
+            return self._plan_time_at_distance(plan, distance), speed
+        remaining = max(0.0, stop_distance - distance)
+        if remaining <= EMIT_MIN_MOVEMENT_M:
+            return self._plan_time_at_distance(plan, stop_distance), 0.0 if stop_at_end else speed
+        lookahead = min(stop_distance, distance + speed * elapsed
+                        + 0.5 * MAX_ACCEL_MS2 * elapsed ** 2)
+        ahead = self._plan_state_at_time(plan, self._plan_time_at_distance(plan, lookahead))
+        desired = ahead["speed"] * min(1.0, max(0.0, factor))
+        next_speed = max(speed - MAX_DECEL_MS2 * elapsed,
+                         min(desired, speed + MAX_ACCEL_MS2 * elapsed))
+        step = min(remaining, max(0.0, (speed + next_speed) * 0.5 * elapsed))
+        # The envelope reaches zero at a stop. Finish its last sub-tick distance
+        # exactly instead of asymptotically approaching it at ever smaller steps.
+        if stop_at_end and remaining <= max(EMIT_MIN_MOVEMENT_M, speed * elapsed):
+            step, next_speed = remaining, 0.0
+        return self._plan_time_at_distance(plan, distance + step), next_speed
+
     def _drive_route_pass(self, plan_key, generation):
         with self._route_plan_lock:
             plan = self._route_plans[plan_key]
@@ -1427,11 +1517,7 @@ class LocationService:
         elapsed = 0.0
         last_wall = time.monotonic()
         schedule_start = last_wall
-        # Unpaid travel time after a slow write. Capping the per-tick advance
-        # avoids a visible catch-up leap, but banking the remainder here (rather
-        # than discarding it) lets the route recover over the next few ticks
-        # instead of drifting permanently behind wall-clock.
-        advance_debt = 0.0
+        motion_speed = self._route_speed_current / 3.6 if plan["cyclic"] else 0.0
         deadline_index = 0
         scheduled_rate = self._target_emit_hz()
         self._route_noise_last_station = None
@@ -1450,7 +1536,7 @@ class LocationService:
                 resumed = time.monotonic()
                 last_wall = resumed
                 schedule_start = resumed
-                advance_debt = 0.0
+                motion_speed = 0.0
                 deadline_index = 0
                 scheduled_rate = self._target_emit_hz()
             if not self._route_active:
@@ -1480,7 +1566,7 @@ class LocationService:
                 self._route_speed_current = 0
                 self._update_route_plan_status(plan, current_state, elapsed, consumed)
                 _, written = self._write_route_fix(
-                    current_state["lat"], current_state["lon"], generation
+                    current_state["lat"], current_state["lon"], generation, plan=plan, state=current_state
                 )
                 if written:
                     last_emitted_distance = current_state["distance"]
@@ -1490,7 +1576,7 @@ class LocationService:
                 resumed = time.monotonic()
                 last_wall = resumed
                 schedule_start = resumed
-                advance_debt = 0.0
+                motion_speed = 0.0
                 deadline_index = 0
                 scheduled_rate = self._target_emit_hz()
                 continue
@@ -1500,9 +1586,8 @@ class LocationService:
                 continue
             now = time.monotonic()
             self._route_emit_deadlines += 1
-            advance_debt += max(0.0, now - last_wall)
-            wall_elapsed = min(MAX_ROUTE_ADVANCE_S, advance_debt)
-            advance_debt -= wall_elapsed
+            wall_elapsed = min(MAX_ROUTE_ADVANCE_PERIODS / scheduled_rate,
+                               max(0.0, now - last_wall))
             last_wall = now
             if self._speed_randomize:
                 self._route_speed_factor += (
@@ -1519,26 +1604,15 @@ class LocationService:
                 self._route_speed_factor = 1.0
 
             factor = self._route_speed_factor
-            if self._route_speeds:
-                # Realistic never eases below its posted-limit-plus-offset cruise
-                # through jitter; only a corner or a stop (both in the plan) may.
-                factor = max(1.0, factor)
-            if current_state["speed"] > 0.001:
-                factor = min(
-                    factor,
-                    current_state["ceiling"] / current_state["speed"],
-                )
-            candidate = min(
-                plan["movement_duration"], elapsed + wall_elapsed * max(0.0, factor)
+            stop_distance = next_hold["distance"] if next_hold else plan["total_distance"]
+            previous_elapsed, previous_speed = elapsed, motion_speed
+            elapsed, motion_speed = self._advance_route_motion(
+                plan, current_state["distance"], motion_speed, wall_elapsed,
+                factor, stop_distance,
+                stop_at_end=bool(next_hold) or not plan["cyclic"],
             )
-            next_hold = self._future_hold(plan, consumed, elapsed)
-            reached_hold = bool(next_hold and candidate >= next_hold["time"])
-            if reached_hold:
-                candidate = next_hold["time"]
-            elapsed = candidate
+            reached_hold = bool(next_hold and elapsed >= next_hold["time"] - 0.000001)
             state = self._plan_state_at_time(plan, elapsed)
-            if reached_hold:
-                state["speed"] = 0.0
             if self._route_speeds and plan["segment_caps"]:
                 segment_index = min(state["segment"], len(plan["segment_caps"]) - 1)
                 self._route_posted_limit_kmh = max(
@@ -1546,14 +1620,14 @@ class LocationService:
                     plan["segment_caps"][segment_index] * 3.6
                     - self._route_over_limit_kmh,
                 )
-            actual_speed = min(state["ceiling"], state["speed"] * factor)
+            actual_speed = motion_speed
             self._route_speed_current = max(0.0, actual_speed * 3.6)
             at_end = elapsed >= plan["movement_duration"]
 
-            stop_distance = plan["total_distance"]
+            stop_distance = math.inf if plan["cyclic"] else plan["total_distance"]
             if next_hold:
                 stop_distance = next_hold["distance"]
-            if reached_hold or at_end:
+            if reached_hold or (at_end and not plan["cyclic"]):
                 lat, lon = state["lat"], state["lon"]
             else:
                 noisy_state = dict(state)
@@ -1567,9 +1641,17 @@ class LocationService:
                      >= EMIT_MIN_MOVEMENT_M)
             written = False
             if reached_hold or at_end or moved:
-                _, written = self._write_route_fix(lat, lon, generation)
+                _, written = self._write_route_fix(lat, lon, generation, plan=plan, state=state)
                 if written:
                     last_emitted_distance = state["distance"]
+                else:
+                    # An unacknowledged fix must not advance our position. Retrying
+                    # resumes from the last accepted station without a leap.
+                    elapsed, motion_speed = previous_elapsed, previous_speed
+                    self._route_noise_last_station = None
+                    state = self._plan_state_at_time(plan, elapsed)
+                    self._update_route_plan_status(plan, state, elapsed, consumed)
+                    reached_hold = at_end = False
 
             if reached_hold:
                 consumed.add(next_hold["id"])
@@ -1580,7 +1662,7 @@ class LocationService:
                 resumed = time.monotonic()
                 last_wall = resumed
                 schedule_start = resumed
-                advance_debt = 0.0
+                motion_speed = 0.0
                 deadline_index = 0
                 scheduled_rate = self._target_emit_hz()
                 continue
@@ -1596,8 +1678,8 @@ class LocationService:
 
     def _route_loop(self, generation):
         self._route_speed_factor = 1.0
-        self._route_noise_along = random.gauss(0, GPS_NOISE_SD_ALONG_M)
-        self._route_noise_across = random.gauss(0, GPS_NOISE_SD_CROSS_M)
+        self._route_noise_along = self._route_noise_across = 0.0
+        self._route_noise_target_along = self._route_noise_target_across = 0.0
         first_key = "cycle" if getattr(self, "_route_closed_loop", False) else "forward"
 
         plan_key = first_key
@@ -1693,6 +1775,8 @@ class LocationService:
                 if self._route_posted_limit_kmh is not None else None
             ),
             "emit_hz": round(self._route_emit_hz, 2),
+            "emit_target_hz": self._route_emit_target_hz,
+            "write_p99_ms": round(self._route_write_p99() * 1000, 1),
             "error": self._route_error,
             "mode": self._route_mode,
             "provider": getattr(self, "_route_provider", "osrm"),
@@ -1754,7 +1838,7 @@ class LocationService:
     def stop_wander(self):
         self._wander_active = False
         if self._wander_thread and self._wander_thread.is_alive():
-            self._wander_thread.join(timeout=5)
+            self._wander_thread.join(timeout=7)
         self._wander_thread = None
         if self.current_location:
             self._start_keepalive()
@@ -1767,33 +1851,35 @@ class LocationService:
             dist = random.uniform(0, self._wander_radius)
             c = self._wander_center
             dlat = (dist / 111320) * math.cos(angle)
-            dlon = (dist / (111320 * math.cos(math.radians(c["lat"])))) * math.sin(angle)
-            target_lat = c["lat"] + dlat
-            target_lon = c["lon"] + dlon
+            dlon = (dist / (111320 * max(.01, math.cos(math.radians(c["lat"]))))) * math.sin(angle)
+            target_lat = max(-90, min(90, c["lat"] + dlat))
+            target_lon = self._wrap_longitude(c["lon"] + dlon)
 
-            # Walk to the target in 300ms steps. Read the shared speed on every
-            # step so edits in the UI take effect without restarting wander.
-            while self._wander_active and self.current_location:
+            speed = 0.0
+            active = lambda: self._wander_active and self.current_location
+            for elapsed in _movement_ticks(active):
                 cur = self.current_location
-                remaining = self._haversine(
-                    cur["lat"], cur["lon"], target_lat, target_lon
-                )
-                if remaining <= 0.05:
+                remaining = self._haversine(cur["lat"], cur["lon"], target_lat, target_lon)
+                if remaining <= EMIT_MIN_MOVEMENT_M:
                     break
-                speed_ms = max(float(self._wander_speed) / 3.6, 0.01)
-                step_distance = min(remaining, speed_ms * 0.3)
-                frac = step_distance / remaining
-                nlat = cur["lat"] + (target_lat - cur["lat"]) * frac
-                nlon = cur["lon"] + (target_lon - cur["lon"]) * frac
+                target_speed = min(self._wander_speed / 3.6,
+                                   math.sqrt(2 * MAX_DECEL_MS2 * remaining))
+                next_speed = max(speed - MAX_DECEL_MS2 * elapsed,
+                                 min(target_speed, speed + MAX_ACCEL_MS2 * elapsed))
+                step_distance = min(remaining, (speed + next_speed) * .5 * elapsed)
+                nlon, nlat = self._interpolate_coordinate(
+                    [cur["lon"], cur["lat"]], [target_lon, target_lat], step_distance / remaining)
                 try:
-                    self._sim_set(nlat, nlon)
+                    self._sim_set(nlat, nlon, timeout=6)
                     self.current_location = {"lat": nlat, "lon": nlon}
+                    speed = next_speed
                 except Exception:
                     pass
-                time.sleep(0.3)
 
-            # Pause briefly at the destination
-            time.sleep(random.uniform(1, 4))
+            # Pause at the destination, while keeping Stop/Reset responsive.
+            until = time.monotonic() + random.uniform(1, 4)
+            while active() and time.monotonic() < until:
+                time.sleep(min(.05, max(0, until - time.monotonic())))
 
     def get_wander_status(self):
         return {

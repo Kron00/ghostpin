@@ -481,7 +481,7 @@ def api_clear_location():
 def api_current_location():
     if loc_svc is None:
         return jsonify({"error": "No iPhone connected. Plug it in, unlock it, and try again."}), 503
-    loc = loc_svc.get_current()
+    loc = loc_svc.get_current(include_route=True)
     if loc is None:
         return jsonify({"error": "No location set"}), 404
     return jsonify(loc)

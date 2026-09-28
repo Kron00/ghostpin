@@ -251,7 +251,7 @@ document.addEventListener("DOMContentLoaded", async () => {
     $("btn-route-calculate").addEventListener("click", calculateAddressRoute);
     $("btn-add-stop").addEventListener("click", addStop);
     $("btn-swap-stops").addEventListener("click", reverseStops);
-    document.querySelectorAll(".mode-tab").forEach(tab => {
+    document.querySelectorAll(".mode-tab[data-build]").forEach(tab => {
         tab.addEventListener("click", () => setBuildMode(tab.dataset.build));
     });
     renderStops();
@@ -1309,7 +1309,7 @@ function setDriveMode(realistic) {
     adaptiveSpeed = realistic;
     localStorage.setItem("adaptive_speed", realistic ? "1" : "0");
     updateAdaptiveUI();
-    toast(realistic ? "Realistic — posted limits, a few mph over" : "Flat speed");
+    toast(realistic ? "Realistic — road limits, natural turns and stops" : "Flat speed");
 }
 
 function updateAdaptiveUI() {
@@ -1594,32 +1594,15 @@ function drawRoamPath(coordinates) {
     roamChunkCoords = coordinates;
     roamChunkIdx = 0;
     if (roamPathLine) { map.removeLayer(roamPathLine); roamPathLine = null; }
-    if (coordinates?.length) updateRoamLookahead(coordinates[0][1], coordinates[0][0]);
+    // The next position poll supplies the preview from the accepted device fix.
 }
 
 function remainingRoamChunk(fromLocation) {
     const coords = roamChunkCoords;
     if (!coords?.length || !fromLocation) return null;
-    const scale = Math.cos(fromLocation.lat * Math.PI / 180) * 111320;
-    const distance = (point) => Math.hypot(
-        (point[1] - fromLocation.lat) * 111320,
-        (point[0] - fromLocation.lon) * scale
-    );
-    let best = Math.max(0, Math.min(roamChunkIdx, coords.length - 1));
-    let bestDistance = distance(coords[best]);
-    // The last position poll normally leaves roamChunkIdx exact. Search around
-    // it for a write that landed between geometry points, but never scan far
-    // enough backward to match an earlier lap of a small loop.
-    const start = Math.max(0, best - 10);
-    const end = Math.min(coords.length, best + 250);
-    for (let index = start; index < end; index++) {
-        const candidateDistance = distance(coords[index]);
-        if (candidateDistance < bestDistance) {
-            best = index;
-            bestDistance = candidateDistance;
-        }
-    }
-
+    // This index comes from the motion engine, so repeated intersections never
+    // snap recovery onto a later visit to the same street.
+    const best = Math.max(0, Math.min(roamChunkIdx, coords.length - 1));
     const coordinates = [[fromLocation.lon, fromLocation.lat], ...coords.slice(best + 1)];
     if (coordinates.length < 2) return null;
     const speeds = Array.isArray(roamChunkSpeeds)
@@ -1698,32 +1681,18 @@ async function recoverRoamingAfterDeviceError(message) {
     }
 }
 
-function updateRoamLookahead(lat, lon) {
-    const coords = roamChunkCoords;
-    if (!coords || !coords.length) return;
-    const scale = Math.cos(lat * Math.PI / 180) * 111320;
-    const dist = (aLat, aLon, bLat, bLon) =>
-        Math.hypot((aLat - bLat) * 111320, (aLon - bLon) * scale);
-    // The dot only moves forward, so search a window ahead of the last match.
-    let best = roamChunkIdx, bestD = Infinity;
-    const end = Math.min(coords.length, roamChunkIdx + 250);
-    for (let i = roamChunkIdx; i < end; i++) {
-        const d = dist(lat, lon, coords[i][1], coords[i][0]);
-        if (d < bestD) { bestD = d; best = i; }
+function updateRoamLookahead(lat, lon, preview, coordinateIndex) {
+    if (Number.isInteger(coordinateIndex) && coordinateIndex >= 0) {
+        roamChunkIdx = coordinateIndex;
     }
-    roamChunkIdx = best;
-    const tail = [[lat, lon]];
-    let acc = 0;
-    let prevLat = coords[best][1], prevLon = coords[best][0];
-    for (let i = best; i < coords.length && acc < 400; i++) {
-        const ptLat = coords[i][1], ptLon = coords[i][0];
-        acc += dist(prevLat, prevLon, ptLat, ptLon);
-        tail.push([ptLat, ptLon]);
-        prevLat = ptLat; prevLon = ptLon;
-    }
+    if (!Array.isArray(preview) || preview.length < 2) return;
+    // The backend clips the next 400 m of its rounded driven path at the exact
+    // accepted fix. Never choose a nearest vertex from a later lap of the route.
+    const tail = [[lat, lon], ...preview.slice(1).map(point => [point[1], point[0]])];
     if (roamPathLine) roamPathLine.setLatLngs(tail);
     else roamPathLine = L.polyline(tail,
-        { color: MAP_INK.path, weight: 3, opacity: 0.7, dashArray: "6 7" }).addTo(map);
+        { color: MAP_INK.path, weight: 3, opacity: 0.85,
+          lineCap: "round", lineJoin: "round", smoothFactor: 0 }).addTo(map);
 }
 
 // When one stretch of road runs out, quietly lay out another so roaming keeps
@@ -1962,7 +1931,7 @@ function reverseStops() { routeStops.reverse(); invalidateCalculatedRoute(); ren
 
 function setBuildMode(mode) {
     if (mode !== "map" && mapPickTarget === "append") setMapPick(null);
-    document.querySelectorAll(".mode-tab").forEach(tab => {
+    document.querySelectorAll(".mode-tab[data-build]").forEach(tab => {
         const on = tab.dataset.build === mode;
         tab.classList.toggle("active", on);
         tab.setAttribute("aria-selected", on ? "true" : "false");
@@ -2264,7 +2233,7 @@ function startMovementTracking() { if (movementPolling) return; movementPolling 
 function stopMovementTracking() { if (movementPolling) { clearInterval(movementPolling); movementPolling = null; } trailPoints = []; }
 async function pollPosition() {
     const epoch = movementEpoch;
-    if (!deviceReady()) return; try { const r = await fetch("/api/location/current"); if (!r.ok) return; const loc = await r.json(); if (epoch !== movementEpoch) return; activeSpoofLocation = { lat: loc.lat, lon: loc.lon }; placeMarker(loc.lat, loc.lon); if (roamActive) updateRoamLookahead(loc.lat, loc.lon); if (followMode) { map.stop(); map.panTo([loc.lat, loc.lon], { animate: true, duration: 0.3, noMoveStart: true }); } } catch (e) {} }
+    if (!deviceReady()) return; try { const r = await fetch("/api/location/current"); if (!r.ok) return; const loc = await r.json(); if (epoch !== movementEpoch) return; activeSpoofLocation = { lat: loc.lat, lon: loc.lon }; placeMarker(loc.lat, loc.lon); if (roamActive) updateRoamLookahead(loc.lat, loc.lon, loc.route_preview, loc.route_coordinate_index); if (followMode) { map.stop(); map.panTo([loc.lat, loc.lon], { animate: true, duration: 0.3, noMoveStart: true }); } } catch (e) {} }
 
 // ── GPX ─────────────────────────────────────────────────────
 // ── Joystick ────────────────────────────────────────────────
