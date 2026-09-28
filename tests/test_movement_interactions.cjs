@@ -17,6 +17,86 @@ const chunk={waypoints:[{lat:48.86,lng:2.30},{lat:48.861,lng:2.301}],coordinates
 const ok=data=>({ok:true,json:async()=>data});
 const tick=()=>new Promise(resolve=>setImmediate(resolve));
 (async()=>{
+ // Start lookup immediately while the previous route stops, but do not move
+ // until both finish. The old serialized flow fails the first assertion.
+ let finishStop, finishLookup; let parallelStarts=0;
+ context.fetch=async url=>{
+  if(url==='/api/route/stop')return new Promise(resolve=>{finishStop=resolve});
+  if(url==='/api/roam/route')return new Promise(resolve=>{finishLookup=resolve});
+  if(url==='/api/route/start')parallelStarts++;
+  return ok({});
+ };
+ let parallelStart=run('startRoaming()'); await tick();
+ assert.equal(typeof finishLookup,'function','Road lookup must not wait for the previous route to stop');
+ finishLookup(ok(chunk)); await tick();
+ assert.equal(parallelStarts,0,'A prepared route must wait for stop confirmation');
+ finishStop(ok({})); await parallelStart;
+ assert.equal(parallelStarts,1);
+ run('cancelMovementUI()');
+ // The inverse completion order must also wait for the roads.
+ parallelStart=run('startRoaming()'); await tick();
+ finishStop(ok({})); await tick(); assert.equal(parallelStarts,1);
+ finishLookup(ok(chunk)); await parallelStart; assert.equal(parallelStarts,2);
+ run('cancelMovementUI()');
+ // Reset while stop is pending and roads are ready cannot start movement.
+ parallelStart=run('startRoaming()'); await tick();
+ finishLookup(ok(chunk)); await tick();
+ await run('clearLocation()');
+ finishStop(ok({})); await parallelStart;
+ assert.equal(parallelStarts,2); assert.equal(run('roamActive'),false);
+ // A failed stop blocks movement, aborts lookup, and handles its later
+ // rejection. Cover both an HTTP error and a broken connection.
+ for(const networkFailure of [false,true]) {
+  let rejectLookup, lookupSignal;
+  context.fetch=async(url,options)=>{
+   if(url==='/api/route/stop') {
+    if(networkFailure)throw new Error('Stop connection failed');
+    return {ok:false,json:async()=>({error:'Could not stop previous route'})};
+   }
+   if(url==='/api/roam/route') {
+    lookupSignal=options.signal;
+    return new Promise((resolve,reject)=>{rejectLookup=reject});
+   }
+   if(url==='/api/route/start')parallelStarts++;
+   return ok({});
+  };
+  await run('startRoaming()');
+  assert.equal(parallelStarts,2);
+  assert.equal(lookupSignal.aborted,true);
+  assert.equal(elements.get('btn-roam-start').disabled,false);
+  run('updateRoamUI()');
+  assert.equal(elements.get('btn-roam-stop').disabled,false,'Failed prerequisite Stop must remain retryable');
+  rejectLookup(new Error('Lookup aborted')); await tick();
+  context.fetch=async()=>ok({});
+  await run('stopRoaming()');
+  assert.equal(elements.get('btn-roam-stop').disabled,true,'Confirmed Stop clears retry state');
+ }
+ // A lookup failure can arrive first; the later stop rejection is handled.
+ let rejectStop;
+ context.fetch=async url=>{
+  if(url==='/api/route/stop')return new Promise((resolve,reject)=>{rejectStop=reject});
+  if(url==='/api/roam/route')throw new Error('Road lookup failed');
+  if(url==='/api/route/start')parallelStarts++;
+  return ok({});
+ };
+ await run('startRoaming()');
+ assert.equal(elements.get('btn-roam-stop').disabled,true);
+ rejectStop(new Error('Stop failed')); await tick();
+ assert.equal(elements.get('btn-roam-stop').disabled,false,'Late Stop failure must also remain retryable');
+ assert.equal(parallelStarts,2);
+ // Reset invalidates a pending Stop failure from an older start attempt.
+ await run('startRoaming()');
+ await run('clearLocation()');
+ rejectStop(new Error('Old Stop failed')); await tick();
+ assert.equal(elements.get('btn-roam-stop').disabled,true);
+ assert.equal(run('roamStopNeedsRetry'),false);
+ // A lookup failure with a successful Stop does not leave a retry button.
+ context.fetch=async url=>{
+  if(url==='/api/roam/route')throw new Error('Road lookup failed');
+  return ok({});
+ };
+ await run('startRoaming()');
+ assert.equal(elements.get('btn-roam-stop').disabled,true);
  // Cancel while roads are loading. A late response must never start a route.
  let resolveRoads; let starts=0;
  context.fetch=async(url)=>{
@@ -69,5 +149,5 @@ const tick=()=>new Promise(resolve=>setImmediate(resolve));
  assert.equal(style.dashArray,undefined);
  assert.equal(style.smoothFactor,0);
  run('cancelMovementUI()');
- console.log('PASS: pending roam cancellation, reset, stale position/prefetch, joystick handoff, device readiness, driven-path preview.');
+ console.log('PASS: parallel roam preparation, stop/lookup failures, pending roam cancellation, reset, stale position/prefetch, joystick handoff, device readiness, driven-path preview.');
 })().catch(error=>{console.error(error);process.exitCode=1});

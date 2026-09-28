@@ -1347,6 +1347,7 @@ let roamUnitMiles = localStorage.getItem("roam_unit") === "mi" ? true
                   : (localStorage.getItem("roam_unit") === "km" ? false : null);
 let roamActive = false;
 let roamStarting = false;
+let roamStopNeedsRetry = false;
 let roamFetchController = null;
 let roamRetryTimer = null;
 let roamWalkState = null;
@@ -1476,7 +1477,7 @@ function updateRoamUI() {
     const ready = !!roamCentre && !!roamRadiusMetres();
     $("btn-roam-start").disabled = !ready || roamActive || roamStarting;
     $("btn-roam-start").textContent = roamStarting ? "Finding roads…" : "Start roaming";
-    $("btn-roam-stop").disabled = !roamActive && !roamStarting;
+    $("btn-roam-stop").disabled = !roamActive && !roamStarting && !roamStopNeedsRetry;
     $("btn-roam-stop").textContent = roamStarting ? "Cancel" : "Stop";
     $("roam-unit-toggle").textContent = roamUnitMiles !== false ? "mi" : "km";
 }
@@ -1491,28 +1492,36 @@ async function startRoaming(silent = false, fromLocation = null, prefetchedData 
     if (!silent) cancelMovementUI();
     const epoch = movementEpoch;
     roamStarting = true;
-    roamFetchController = new AbortController();
+    const fetchController = new AbortController();
+    roamFetchController = fetchController;
     setRoamStatus("Finding drivable roads. This can take up to 30 seconds; you can cancel.");
     updateRoamUI();
     if (!silent) {
         roamWalkState = null;
         roamPrefetch = null;
-        // A fresh roam begins from a clean slate. Stop any route still running
-        // — a stale session, or one this window lost track of — so the start is
-        // never locked out by "A route is already running".
-        try { await fetch("/api/route/stop", { method: "POST" }); } catch (e) { /* ignore */ }
-        if (epoch !== movementEpoch) return;
         toast("Finding roads to roam…");
     }
 
     try {
-        let data = prefetchedData;
-        if (!data) {
-            const result = await fetchRoamChunkData(fromLocation, silent, roamFetchController.signal);
-            if (epoch !== movementEpoch) return;
-            if (result.error) { return failRoam(silent, result.error); }
-            data = result.data;
-        }
+        // Road lookup only prepares data, so it can run while the old writer
+        // stops (which can take seconds on a slow device connection). Still
+        // require both to succeed before allowing any new movement.
+        const [, result] = await Promise.all([
+            silent ? Promise.resolve() : requestMutation("/api/route/stop").catch(error => {
+                // A lookup can fail before Stop replies. Keep Stop available
+                // if that later reply also fails: the old writer may remain.
+                if (epoch === movementEpoch) {
+                    roamStopNeedsRetry = true;
+                    updateRoamUI();
+                }
+                throw error;
+            }),
+            prefetchedData ? Promise.resolve({ data: prefetchedData })
+                : fetchRoamChunkData(fromLocation, silent, fetchController.signal)
+        ]);
+        if (epoch !== movementEpoch) return;
+        if (result.error) { return failRoam(silent, result.error); }
+        const data = result.data;
 
         const startRequest = {
             waypoints: data.waypoints, speed, mode: "once",
@@ -1568,7 +1577,10 @@ async function startRoaming(silent = false, fromLocation = null, prefetchedData 
         startMovementTracking();
         if (!silent) toast("Roaming " + data.distance_km + " km of roads");
     } catch (e) {
-        if (epoch === movementEpoch) failRoam(silent, "Could not start roaming");
+        // If stopping fails, discard the parallel lookup too. Keep the local
+        // controller so an old completion cannot cancel a newer attempt.
+        fetchController.abort();
+        if (epoch === movementEpoch) failRoam(silent, e.message || "Could not start roaming");
     } finally {
         if (epoch === movementEpoch) {
             roamStarting = false;
@@ -1726,6 +1738,7 @@ function cancelMovementUI() {
     movementEpoch++;
     roamActive = false;
     roamStarting = false;
+    roamStopNeedsRetry = false;
     routeStarting = false;
     roamFetchController?.abort();
     roamFetchController = null;
@@ -1748,13 +1761,17 @@ function cancelMovementUI() {
 async function stopRoaming() {
     if ($("btn-roam-stop").disabled) return;
     cancelMovementUI();
+    const epoch = movementEpoch;
     try {
         await requestMutation("/api/route/stop");
+        if (epoch !== movementEpoch) return;
         await requestMutation("/api/wander/stop");
         toast("Roaming stopped");
     } catch (error) {
+        if (epoch !== movementEpoch) return;
         // Keep Stop retryable without restarting the automatic continuation.
-        $("btn-roam-stop").disabled = false;
+        roamStopNeedsRetry = true;
+        updateRoamUI();
         toast(error.message || "Could not stop roaming. Try again.", "error");
     }
 }
