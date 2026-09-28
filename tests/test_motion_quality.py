@@ -230,6 +230,69 @@ class MotionQualityTests(unittest.TestCase):
         service._route_generation += 1
         self.assertNotIn('route_preview', service.get_current(include_route=True))
 
+    def test_rest_just_before_signal_arrives_at_every_supported_cadence(self):
+        coordinates = [[2.2945, 48.8584], [2.2955, 48.8584], [2.2965, 48.8584]]
+        service = self.service(coordinates, speed=30)
+        service._route_coordinates = coordinates
+        service._route_holds = [{'id': 0, 'original_index': 1, 'kind': 'signal'}]
+        service._map_route_holds()
+        plan = service._build_motion_plan()
+        stop = plan['holds'][0]['distance']
+        for dt in (.05, 1/15, .1, .125, .2, .3, 1.0):
+            for gap in (.021, .025, .03, .039, .05, .089, .5):
+                with self.subTest(dt=dt, gap=gap):
+                    distance, speed = stop - gap, 0
+                    for _ in range(100):
+                        previous = distance
+                        elapsed, speed = service._advance_route_motion(plan, distance, speed, dt, 1, stop)
+                        distance = service._plan_state_at_time(plan, elapsed)['distance']
+                        self.assertGreaterEqual(distance + 1e-8, previous)
+                        self.assertLessEqual(distance, stop + 1e-8)
+                        if abs(distance - stop) < 1e-7:
+                            break
+                    self.assertAlmostEqual(distance, stop, places=7)
+                    self.assertEqual(speed, 0)
+                    for _ in range(20):
+                        elapsed, speed = service._advance_route_motion(
+                            plan, distance, speed, dt, 1, plan['total_distance'])
+                        distance = service._plan_state_at_time(plan, elapsed)['distance']
+                    self.assertGreater(distance, stop + .5)
+
+    def test_slow_cadence_enters_signal_dwell_and_completes_route(self):
+        coordinates = [[2.2945, 48.8584], [2.2945, 48.8584 + .03 / 111195],
+                       [2.2945, 48.8585]]
+        service = self.service(coordinates, speed=5)
+        service._route_coordinates = coordinates
+        service._route_holds = [{'id': 0, 'original_index': 1, 'kind': 'signal'}]
+        service._map_route_holds()
+        service._route_plans = {'forward': service._build_motion_plan()}
+        service._route_active = True
+        service._route_generation = 1
+        service._route_speed_factor = 1
+        service._route_gps_noise = False
+        service._route_emit_max_hz = service._route_emit_target_hz = 5
+        now = [1000.0]
+        dwells = []
+        original_dwell = service._route_dwell
+        def sleep(seconds):
+            now[0] += max(seconds, .000001)
+            if now[0] > 1030:
+                raise AssertionError('Route stalled before its stop or endpoint')
+        def write(lat, lon, timeout=None):
+            now[0] += .04
+        def dwell(state, *args, **kwargs):
+            dwells.append((state['speed'], kwargs.get('kind')))
+            return original_dwell(state, *args, **kwargs)
+        with patch('location_service.time.monotonic', lambda: now[0]), \
+                patch('location_service.time.sleep', sleep), \
+                patch.object(service, '_sim_set', write), \
+                patch.object(service, '_sample_dwell', return_value=.4), \
+                patch.object(service, '_route_dwell', dwell):
+            self.assertTrue(service._drive_route_pass('forward', 1))
+        self.assertEqual(dwells, [(0.0, 'signal')])
+        self.assertEqual(service._route_progress, 100)
+        self.assertEqual(service._route_speed_current, 0)
+
 
 if __name__ == '__main__':
     unittest.main()

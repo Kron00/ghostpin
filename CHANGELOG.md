@@ -53,6 +53,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Finish signal approaches at slower update rates instead of remaining at zero
+  speed just short of the stop. Remove the redundant connection and consistency
+  pills from the bottom status bar.
+
 - Pace routes, joystick, and Wander on absolute deadlines, with up to 20 fixes
   per second and recovery after transient transport delays. Drop delayed travel
   time instead of creating catch-up jumps.
