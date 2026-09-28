@@ -27,16 +27,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-- Refine the workspace with quieter dark cartography, clearer sections, larger
-  controls, labelled fields, and a visible map above panels in narrow windows.
-- Keep search results current, invalidate routes when stops change, restore
-  saved speed/playback settings, and report failed actions without false success.
-- Add schedule pause/enable controls and keyboard access to saved items; stop
-  joystick movement when the window loses focus or a pointer is released.
+### Added
+
+- Schedule pause/enable controls and keyboard access to saved items.
+- Isolated API, movement, and JavaScript regressions plus a disposable browser
+  preview server for testing without hardware or personal saved data.
+
+### Changed
+
+- Rework the interface into a single dark design drawn from the app icon:
+  slate-night glass panels, a cream accent reserved for Warp, active modes,
+  the pin, and routes, and sage for live and healthy states.
+- Remove the light theme and its toggle. The map keeps a night/day basemap
+  switch, now remembered between launches.
+- Show the coordinate readout as a two-line fix with hemispheres, and mark the
+  simulated position with the pin from the app icon.
+- Sentence-case every label, redesign onboarding, the setup card, modals,
+  toasts, checkboxes, and the status bar, and move secondary top-bar actions
+  into a compact icon group. Narrow windows show the map above the panels.
 - Validate saved locations, profiles, schedules, and routes before writing them;
   allow GPX import and circular planning before a phone connects.
-- Add isolated API, movement, and JavaScript regressions plus a disposable
-  browser preview server for testing without hardware or personal saved data.
+
+### Fixed
+
+- Keep search results current, invalidate routes when stops change, restore
+  saved speed/playback settings, and report failed actions without false success.
+- Stop joystick movement when the window loses focus or a pointer is released.
+- The status-bar cooldown text referenced colour tokens that did not exist, so
+  it never changed colour when a cooldown was active.
 
 ## [2.1.0] — 2026-08-06
 

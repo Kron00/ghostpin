@@ -40,7 +40,7 @@ remain active until reset or the developer connection ends.
 - Saved and recent locations, profiles, schedules, and route history
 - Multi-device selection over USB or paired Wi-Fi
 - Cooldown, GPS jitter, IP/GPS mismatch, and timezone guidance
-- Dark and light cartographic themes in a native pywebview window
+- A dark, map-first interface in a native pywebview window, with a night or day basemap
 
 ## Requirements
 
