@@ -7,6 +7,7 @@ import random
 import shutil
 import threading
 import time
+import uuid
 import xml.etree.ElementTree as ET
 from datetime import datetime
 
@@ -183,7 +184,44 @@ class LocationService:
         with self._simulation_lock:
             self.bridge.run(self.simulator.clear())
 
+    @staticmethod
+    def validate_coordinates(lat, lon):
+        try:
+            if isinstance(lat, bool) or isinstance(lon, bool):
+                raise ValueError
+            lat, lon = float(lat), float(lon)
+        except (TypeError, ValueError):
+            raise ValueError("Enter valid latitude and longitude") from None
+        if not (-90 <= lat <= 90 and -180 <= lon <= 180):
+            raise ValueError("Latitude must be between -90 and 90, and longitude between -180 and 180")
+        return lat, lon
+
+    @staticmethod
+    def validate_speed(speed):
+        try:
+            if isinstance(speed, bool):
+                raise ValueError
+            speed = float(speed)
+        except (TypeError, ValueError):
+            raise ValueError("Speed must be between 1 and 300 km/h") from None
+        if not 1 <= speed <= 300:
+            raise ValueError("Speed must be between 1 and 300 km/h")
+        return speed
+
+    @classmethod
+    def validate_waypoints(cls, waypoints):
+        if not isinstance(waypoints, list) or not 2 <= len(waypoints) <= 20000:
+            raise ValueError("A route needs between 2 and 20000 waypoints")
+        normalized = []
+        for point in waypoints:
+            if not isinstance(point, dict):
+                raise ValueError("Each waypoint needs latitude and longitude")
+            lat, lon = cls.validate_coordinates(point.get("lat"), point.get("lng"))
+            normalized.append({**point, "lat": lat, "lng": lon})
+        return normalized
+
     def set_location(self, lat, lon):
+        lat, lon = self.validate_coordinates(lat, lon)
         # Cooldown is about how far the phone appears to have travelled, which
         # is just as true of the first jump after a reset as of any other. Use
         # the last position we knew, which outlives clear_location.
@@ -202,6 +240,11 @@ class LocationService:
         return {"status": "Location set", "lat": lat, "lon": lon}
 
     def clear_location(self):
+        # Join movement writers before clearing their state: an in-flight write
+        # may otherwise restore current_location and restart keep-alive after reset.
+        self.stop_route()
+        self.joystick_stop()
+        self.stop_wander()
         self._stop_keepalive()
         # Deliberately keep _last_known_position: the next jump is still a jump
         # from where the phone was last pretending to be.
@@ -209,9 +252,6 @@ class LocationService:
         self._cooldown_end = 0
         self._last_teleport_time = None
         self._last_teleport_coords = None
-        self.stop_route()
-        self.joystick_stop()
-        self.stop_wander()
         try:
             self._sim_clear()
         except Exception:
@@ -308,11 +348,16 @@ class LocationService:
 
     def joystick_start(self, direction, speed_kmh=5):
         """Start continuous movement in a direction."""
-        if direction not in self._DIRECTIONS:
+        speed_kmh = self.validate_speed(speed_kmh)
+        if not isinstance(direction, str) or direction not in self._DIRECTIONS:
             raise ValueError(f"Invalid direction: {direction}")
         if not self.current_location:
             raise ValueError("No location set. Set a location first.")
 
+        if self._route_active:
+            self.stop_route()
+        if self._wander_active:
+            self.stop_wander()
         self._joystick_direction = direction
         self._joystick_speed = speed_kmh
 
@@ -389,8 +434,7 @@ class LocationService:
         with self._route_state_lock:
             if self._route_active:
                 raise ValueError("A route is already running. Stop it first.")
-        if len(waypoints) < 2:
-            raise ValueError("Need at least 2 waypoints.")
+        waypoints = self.validate_waypoints(waypoints)
         if mode not in ("once", "loop", "pingpong"):
             mode = "once"
 
@@ -1645,22 +1689,40 @@ class LocationService:
 
     def generate_circular_route(self, center_lat, center_lon, radius_m, points=36):
         """Generate waypoints in a circle. Returns list of {lat, lng}."""
+        center_lat, center_lon = self.validate_coordinates(center_lat, center_lon)
+        if not math.isfinite(radius_m) or not 1 <= radius_m <= 100000:
+            raise ValueError("Radius must be between 1 and 100000 metres")
+        if not 3 <= points <= 360:
+            raise ValueError("A circle needs between 3 and 360 points")
+        # A spherical destination stays valid at the poles and date line.
+        lat, lon = math.radians(center_lat), math.radians(center_lon)
+        angular = radius_m / 6371000
         waypoints = []
-        for i in range(points + 1):  # +1 to close the circle
-            angle = 2 * math.pi * i / points
-            dlat = (radius_m / 111320) * math.cos(angle)
-            dlon = (radius_m / (111320 * math.cos(math.radians(center_lat)))) * math.sin(angle)
-            waypoints.append({
-                "lat": center_lat + dlat,
-                "lng": center_lon + dlon,
-            })
+        for i in range(points):
+            bearing = 2 * math.pi * i / points
+            north = math.sin(angular) * math.cos(bearing)
+            east = math.sin(angular) * math.sin(bearing)
+            radial = math.cos(angular)
+            x = (radial * math.cos(lat) - north * math.sin(lat)) * math.cos(lon) - east * math.sin(lon)
+            y = (radial * math.cos(lat) - north * math.sin(lat)) * math.sin(lon) + east * math.cos(lon)
+            z = radial * math.sin(lat) + north * math.cos(lat)
+            dest_lat = math.atan2(z, math.hypot(x, y))
+            dest_lon = math.atan2(y, x)
+            waypoints.append({"lat": math.degrees(dest_lat),
+                              "lng": self._wrap_longitude(math.degrees(dest_lon))})
+        waypoints.append(dict(waypoints[0]))
         return waypoints
 
     # ── Random wander ──────────────────────────────────────
 
     def start_wander(self, lat, lon, radius_m, speed_kmh=5):
+        lat, lon = self.validate_coordinates(lat, lon)
+        speed_kmh = self.validate_speed(speed_kmh)
+        if not math.isfinite(radius_m) or not 1 <= radius_m <= 100000:
+            raise ValueError("Radius must be between 1 and 100000 metres")
         if self._wander_active:
             raise ValueError("Wander is already running.")
+        self.stop_route()
         if not self.current_location:
             self.set_location(lat, lon)
 
@@ -1795,6 +1857,9 @@ class LocationService:
         if not waypoints:
             raise ValueError("No waypoints found in GPX file")
 
+        for point in waypoints:
+            point["lat"], point["lng"] = self.validate_coordinates(point["lat"], point["lng"])
+
         if len(waypoints) > self.MAX_GPX_WAYPOINTS:
             waypoints = waypoints[:self.MAX_GPX_WAYPOINTS]
 
@@ -1836,11 +1901,16 @@ class LocationService:
             "name": name,
             "lat": data.get("lat") if data else (self.current_location or {}).get("lat"),
             "lon": data.get("lon") if data else (self.current_location or {}).get("lon"),
-            "speed": (data.get("speed", self._route_speed_target)
-                      if data else self._route_speed_target),
+            "speed": (data.get("speed", self._route_speed_target or 5)
+                      if data else self._route_speed_target or 5),
             "route_mode": data.get("route_mode", self._route_mode) if data else self._route_mode,
             "created": datetime.now().isoformat(),
         }
+        if profile["lat"] is not None or profile["lon"] is not None:
+            profile["lat"], profile["lon"] = self.validate_coordinates(profile["lat"], profile["lon"])
+        profile["speed"] = self.validate_speed(profile["speed"])
+        if profile["route_mode"] not in ("once", "loop", "pingpong"):
+            raise ValueError("Choose a valid route mode")
         with self._file_lock:
             profiles = self.get_profiles()
             # Update existing or append
@@ -1884,8 +1954,17 @@ class LocationService:
 
     def save_schedule(self, name, lat, lon, time_str, days=None):
         """Save a scheduled location. time_str is 'HH:MM', days is list like ['mon','tue']."""
+        lat, lon = self.validate_coordinates(lat, lon)
+        if (not isinstance(time_str, str) or len(time_str) != 5
+                or time_str[2] != ":" or not time_str[:2].isdigit()
+                or not time_str[3:].isdigit() or int(time_str[:2]) > 23
+                or int(time_str[3:]) > 59):
+            raise ValueError("Time must use HH:MM in the 24-hour clock")
+        weekdays = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]
+        if days is not None and (not isinstance(days, list) or any(day not in weekdays for day in days)):
+            raise ValueError("Choose valid weekdays")
         schedule = {
-            "id": str(int(time.time() * 1000)),
+            "id": uuid.uuid4().hex,
             "name": name,
             "lat": lat, "lon": lon,
             "time": time_str,
@@ -1953,6 +2032,9 @@ class LocationService:
         return data
 
     def save_location(self, name, lat, lon, category="default"):
+        lat, lon = self.validate_coordinates(lat, lon)
+        if not isinstance(category, str) or len(category) > 100:
+            raise ValueError("Category must be text of at most 100 characters")
         with self._file_lock:
             locations = self.get_saved()
             for loc in locations:
@@ -2026,8 +2108,18 @@ class LocationService:
             return []
 
     def save_route(self, name, waypoints, speed, mode, distance):
+        waypoints = self.validate_waypoints(waypoints)
+        speed = self.validate_speed(speed)
+        if mode not in ("once", "loop", "pingpong"):
+            raise ValueError("Choose a valid route mode")
+        try:
+            distance = float(distance)
+        except (TypeError, ValueError):
+            raise ValueError("Route distance must be a positive number") from None
+        if not math.isfinite(distance) or distance < 0:
+            raise ValueError("Route distance must be a positive number")
         route = {
-            "id": str(int(time.time() * 1000)),
+            "id": uuid.uuid4().hex,
             "name": name,
             "waypoints": waypoints,
             "speed": speed,

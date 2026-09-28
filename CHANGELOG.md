@@ -27,6 +27,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Refine the workspace with quieter dark cartography, clearer sections, larger
+  controls, labelled fields, and a visible map above panels in narrow windows.
+- Keep search results current, invalidate routes when stops change, restore
+  saved speed/playback settings, and report failed actions without false success.
+- Add schedule pause/enable controls and keyboard access to saved items; stop
+  joystick movement when the window loses focus or a pointer is released.
+- Validate saved locations, profiles, schedules, and routes before writing them;
+  allow GPX import and circular planning before a phone connects.
+- Add isolated API, movement, and JavaScript regressions plus a disposable
+  browser preview server for testing without hardware or personal saved data.
+
 ## [2.1.0] — 2026-08-06
 
 Interface rebuild, a rethought route builder, adaptive speed, and the fixes

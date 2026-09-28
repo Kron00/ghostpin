@@ -7,6 +7,7 @@ let map, marker, userLocationMarker, routeLine, routeDisplayLine;
 let routePoints = [];
 let routeMarkers = [];
 let routePolling = null;
+let routeStarting = false;
 let lastRouteStatus = null;
 let searchTimeout = null;
 let selectedSpeed = 15;
@@ -20,6 +21,7 @@ let followMode = false;
 let movementPolling = null;
 let searchHighlightIndex = -1;
 let searchAbortController = null;
+let searchGeneration = 0;
 let startupLocation = null;
 let routeDistanceKm = 0;
 let routeTraveledLine = null;
@@ -297,11 +299,27 @@ document.addEventListener("DOMContentLoaded", async () => {
 
     // Joystick
     document.querySelectorAll(".joy-btn[data-dir]").forEach(btn => {
-        btn.addEventListener("mousedown", () => joystickMove(btn.dataset.dir));
-        btn.addEventListener("mouseup", joystickStop);
-        btn.addEventListener("mouseleave", joystickStop);
+        btn.addEventListener("pointerdown", event => {
+            if (event.button !== 0) return;
+            event.preventDefault();
+            btn.setPointerCapture(event.pointerId);
+            joystickMove(btn.dataset.dir);
+        });
+        btn.addEventListener("pointerup", joystickStop);
+        btn.addEventListener("pointercancel", joystickStop);
+        btn.addEventListener("lostpointercapture", () => { if (joystickDirection) joystickStop(); });
     });
     $("btn-joy-stop").addEventListener("click", joystickStop);
+    window.addEventListener("blur", () => { if (joystickDirection) joystickStop(); });
+    document.addEventListener("visibilitychange", () => {
+        if (document.hidden && joystickDirection) joystickStop();
+    });
+    [["save-name", confirmSaveLocation], ["profile-name", confirmSaveProfile],
+     ["schedule-name", confirmAddSchedule], ["schedule-time", confirmAddSchedule]].forEach(([id, submit]) => {
+        $(id).addEventListener("keydown", event => {
+            if (event.key === "Enter") { event.preventDefault(); submit(); }
+        });
+    });
     document.querySelectorAll("[data-ob-next]").forEach(el =>
         el.addEventListener("click", () => obNext(parseInt(el.dataset.obNext, 10))));
     document.querySelectorAll("[data-ob-skip]").forEach(el => el.addEventListener("click", obSkip));
@@ -435,6 +453,31 @@ function maskUdid(udid) {
 }
 function esc(s) { const d = document.createElement("div"); d.textContent = s; return d.innerHTML; }
 function escAttr(s) { return esc(s).replace(/"/g, "&quot;").replace(/'/g, "&#39;"); }
+
+// Shared mutations only report success once the server confirms it.
+async function requestMutation(url, options = {}) {
+    const response = await fetch(url, { method: "POST", ...options });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(data.error || "Could not complete the action. Please try again.");
+    return data;
+}
+
+async function deleteSavedItem(button, url, reload, message) {
+    if (button.disabled) return;
+    button.disabled = true;
+    try { await requestMutation(url, { method: "DELETE" }); await reload(); toast(message); }
+    catch (error) { toast(error.message, "error"); button.disabled = false; }
+}
+
+function makeItemAccessible(item) {
+    item.tabIndex = 0;
+    item.setAttribute("role", "button");
+    item.addEventListener("keydown", event => {
+        if (event.target === item && (event.key === "Enter" || event.key === " ")) {
+            event.preventDefault(); item.click();
+        }
+    });
+}
 
 // ── Panels ──────────────────────────────────────────────────
 function togglePanel(panelId) {
@@ -648,15 +691,22 @@ function renderSearchMessage(message, className = "") {
 }
 
 function onSearchInput(e) {
+    searchGeneration += 1;
+    searchHighlightIndex = -1;
     const q = e.target.value.trim();
     clearTimeout(searchTimeout);
     searchAbortController?.abort();
+    $("search-results").classList.remove("visible");
     if (q.length < 2) { $("search-results").classList.remove("visible"); return; }
     searchTimeout = setTimeout(() => doSearch(q), 400);
 }
 
 function onSearchKeydown(e) {
     const results = $("search-results"), items = results.querySelectorAll(".search-item");
+    if (e.key === "Escape") {
+        clearTimeout(searchTimeout); searchAbortController?.abort(); searchGeneration += 1;
+        results.classList.remove("visible"); searchHighlightIndex = -1; return;
+    }
     if (!items.length || !results.classList.contains("visible")) { if (e.key === "Escape") { results.classList.remove("visible"); searchHighlightIndex = -1; } return; }
     if (e.key === "ArrowDown") { e.preventDefault(); searchHighlightIndex = Math.min(searchHighlightIndex + 1, items.length - 1); updateSearchHighlight(items); }
     else if (e.key === "ArrowUp") { e.preventDefault(); searchHighlightIndex = Math.max(searchHighlightIndex - 1, 0); updateSearchHighlight(items); }
@@ -667,6 +717,7 @@ function onSearchKeydown(e) {
 function updateSearchHighlight(items) { items.forEach((item, i) => { item.classList.toggle("highlighted", i === searchHighlightIndex); if (i === searchHighlightIndex) item.scrollIntoView({ block: "nearest" }); }); }
 
 async function doSearch(q) {
+    const generation = ++searchGeneration;
     searchHighlightIndex = -1;
     searchAbortController?.abort();
     searchAbortController = new AbortController();
@@ -684,7 +735,7 @@ async function doSearch(q) {
         const r = await fetch("/api/search?" + params.toString(), { signal: searchAbortController.signal });
         const results = await r.json();
         const c = $("search-results");
-        if ($("search-input").value.trim() !== q) return;
+        if (generation !== searchGeneration || $("search-input").value.trim() !== q) return;
         if (!r.ok) return renderSearchMessage(results.error || "Search unavailable", "error");
         if (!Array.isArray(results) || !results.length) return renderSearchMessage("No places found. Try an address or coordinates.", "empty");
         c.textContent = "";
@@ -769,7 +820,7 @@ async function doSearch(q) {
             c.appendChild(item);
         });
         c.classList.add("visible");
-    } catch (e) { if (e.name !== "AbortError") renderSearchMessage("Search is temporarily unavailable", "error"); }
+    } catch (e) { if (generation === searchGeneration && e.name !== "AbortError") renderSearchMessage("Search is temporarily unavailable", "error"); }
 }
 
 function formatSearchDistance(km) {
@@ -880,24 +931,24 @@ async function toggleDeviceDropdown() {
 async function loadRecent() { try { const r = await fetch("/api/history"); const history = await r.json(); recentLocations = history.slice(0, 15).map(h => ({ lat: Number(h.lat), lon: Number(h.lon), ts: Number(h.ts) * 1000 })); renderRecent(); } catch (e) { renderRecent(); } }
 function addToRecent(lat, lon) { const entry = { lat: +lat.toFixed(6), lon: +lon.toFixed(6), ts: Date.now() }; recentLocations = recentLocations.filter(r => Math.abs(r.lat - entry.lat) > 0.0005 || Math.abs(r.lon - entry.lon) > 0.0005); recentLocations.unshift(entry); recentLocations = recentLocations.slice(0, 15); renderRecent(); }
 async function clearRecent() { try { const r = await fetch("/api/history", { method: "DELETE" }); if (!r.ok) throw new Error("clear failed"); recentLocations = []; renderRecent(); toast("History cleared"); } catch (e) { toast("Failed to clear history", "error"); } }
-function renderRecent() { const c = $("recent-list"); c.textContent = ""; if (!recentLocations.length) { const e = document.createElement("div"); e.className = "empty-state"; e.textContent = "No recent locations"; c.appendChild(e); return; } recentLocations.forEach(r => { const item = document.createElement("div"); item.className = "saved-item"; item.dataset.lat = r.lat; item.dataset.lon = r.lon; const n = document.createElement("span"); n.className = "saved-name"; n.textContent = r.lat.toFixed(4) + ", " + r.lon.toFixed(4); const co = document.createElement("span"); co.className = "saved-coords"; co.textContent = timeAgo(r.ts); item.appendChild(n); item.appendChild(co); item.addEventListener("click", () => { map.flyTo([r.lat, r.lon], 15, { duration: 1 }); placeMarker(r.lat, r.lon); if (teleportMode) teleportTo(r.lat, r.lon); }); c.appendChild(item); }); }
+function renderRecent() { const c = $("recent-list"); c.textContent = ""; if (!recentLocations.length) { const e = document.createElement("div"); e.className = "empty-state"; e.textContent = "No recent locations"; c.appendChild(e); return; } recentLocations.forEach(r => { const item = document.createElement("div"); item.className = "saved-item"; makeItemAccessible(item); item.dataset.lat = r.lat; item.dataset.lon = r.lon; const n = document.createElement("span"); n.className = "saved-name"; n.textContent = r.lat.toFixed(4) + ", " + r.lon.toFixed(4); const co = document.createElement("span"); co.className = "saved-coords"; co.textContent = timeAgo(r.ts); item.appendChild(n); item.appendChild(co); item.addEventListener("click", () => { map.flyTo([r.lat, r.lon], 15, { duration: 1 }); placeMarker(r.lat, r.lon); if (teleportMode) teleportTo(r.lat, r.lon); }); c.appendChild(item); }); }
 function timeAgo(ts) { const s = Math.floor((Date.now() - ts) / 1000); if (s < 60) return "just now"; if (s < 3600) return Math.floor(s / 60) + "m ago"; if (s < 86400) return Math.floor(s / 3600) + "h ago"; return Math.floor(s / 86400) + "d ago"; }
 
 // ── Popular ─────────────────────────────────────────────────
-function renderPopular() { const c = $("popular-list"); c.textContent = ""; POPULAR.forEach(p => { const item = document.createElement("div"); item.className = "saved-item"; const n = document.createElement("span"); n.className = "saved-name"; n.textContent = p.name; item.appendChild(n); item.addEventListener("click", () => { map.flyTo([p.lat, p.lon], 15, { duration: 1.2 }); placeMarker(p.lat, p.lon); if (teleportMode) teleportTo(p.lat, p.lon); }); c.appendChild(item); }); }
+function renderPopular() { const c = $("popular-list"); c.textContent = ""; POPULAR.forEach(p => { const item = document.createElement("div"); item.className = "saved-item"; makeItemAccessible(item); const n = document.createElement("span"); n.className = "saved-name"; n.textContent = p.name; item.appendChild(n); item.addEventListener("click", () => { map.flyTo([p.lat, p.lon], 15, { duration: 1.2 }); placeMarker(p.lat, p.lon); if (teleportMode) teleportTo(p.lat, p.lon); }); c.appendChild(item); }); }
 
 // ── Saved locations ─────────────────────────────────────────
 async function loadSaved() {
     try { const r = await fetch("/api/saved"); const locs = await r.json(); const c = $("saved-list"); c.textContent = "";
     if (!locs.length) { const e = document.createElement("div"); e.className = "empty-state"; e.textContent = "No saved locations"; c.appendChild(e); return; }
-    locs.forEach(l => { const item = document.createElement("div"); item.className = "saved-item"; item.dataset.lat = l.lat; item.dataset.lon = l.lon; const n = document.createElement("span"); n.className = "saved-name"; n.textContent = l.name; const co = document.createElement("span"); co.className = "saved-coords"; co.textContent = l.lat.toFixed(2) + ", " + l.lon.toFixed(2); const del = document.createElement("button"); del.className = "saved-del"; del.title = "Delete"; del.textContent = "\u00D7"; del.addEventListener("click", async e => { e.stopPropagation(); await fetch("/api/saved/" + encodeURIComponent(l.name), { method: "DELETE" }); loadSaved(); toast('Deleted "' + l.name + '"'); }); item.appendChild(n); item.appendChild(co); item.appendChild(del); item.addEventListener("click", e => { if (e.target.classList.contains("saved-del")) return; map.flyTo([l.lat, l.lon], 15, { duration: 1 }); placeMarker(l.lat, l.lon); if (teleportMode) teleportTo(l.lat, l.lon); }); c.appendChild(item); });
+    locs.forEach(l => { const item = document.createElement("div"); item.className = "saved-item"; makeItemAccessible(item); item.dataset.lat = l.lat; item.dataset.lon = l.lon; const n = document.createElement("span"); n.className = "saved-name"; n.textContent = l.name; const co = document.createElement("span"); co.className = "saved-coords"; co.textContent = l.lat.toFixed(2) + ", " + l.lon.toFixed(2); const del = document.createElement("button"); del.className = "saved-del"; del.title = "Delete"; del.textContent = "\u00D7"; del.addEventListener("click", async e => { e.stopPropagation(); await deleteSavedItem(del, "/api/saved/" + encodeURIComponent(l.name), loadSaved, 'Deleted "' + l.name + '"'); }); item.appendChild(n); item.appendChild(co); item.appendChild(del); item.addEventListener("click", e => { if (e.target.classList.contains("saved-del")) return; map.flyTo([l.lat, l.lon], 15, { duration: 1 }); placeMarker(l.lat, l.lon); if (teleportMode) teleportTo(l.lat, l.lon); }); c.appendChild(item); });
     } catch (e) {}
 }
 
 // ── Inline save form ────────────────────────────────────────
 function showSaveForm() {
     setTimeout(() => revealForm("save-form"), 0); const lat = parseFloat($("lat-input").value), lon = parseFloat($("lon-input").value); if (isNaN(lat) || isNaN(lon)) return toast("Place a marker first", "error"); $("save-form").classList.remove("hidden"); $("save-name").value = ""; $("save-name").focus(); }
-async function confirmSaveLocation() { const name = $("save-name").value.trim(); if (!name) return toast("Enter a name", "error"); const lat = parseFloat($("lat-input").value), lon = parseFloat($("lon-input").value); const cat = document.querySelector(".cat-pill.active")?.dataset.cat || "default"; try { const r = await fetch("/api/saved", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ name, lat, lon, category: cat }) }); if (r.ok) { loadSaved(); setPlacesTab("saved"); toast('Saved "' + name + '"'); $("save-form").classList.add("hidden"); } else { const d = await r.json(); toast(d.error || "Failed", "error"); } } catch (e) { toast("Connection error", "error"); } }
+async function confirmSaveLocation() { const name = $("save-name").value.trim(); if (!name) return toast("Enter a name", "error"); const lat = parseFloat($("lat-input").value), lon = parseFloat($("lon-input").value); if (!coordsInRange(lat, lon)) return toast("Choose a valid location before saving", "error"); const cat = document.querySelector(".cat-pill.active")?.dataset.cat || "default"; try { const r = await fetch("/api/saved", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ name, lat, lon, category: cat }) }); if (r.ok) { loadSaved(); setPlacesTab("saved"); toast('Saved "' + name + '"'); $("save-form").classList.add("hidden"); } else { const d = await r.json(); toast(d.error || "Failed", "error"); } } catch (e) { toast("Connection error", "error"); } }
 
 // ── Route / Movement ────────────────────────────────────────
 function addRoutePoint(lat, lng, preserveCalculated = false) { if (!preserveCalculated) { calculatedRouteCoordinates = null; calculatedRouteProvider = null; calculatedRouteSummary = null; calculatedRouteHolds = null; } routePoints.push({ lat, lng }); const m = L.circleMarker([lat, lng], { radius: 6, color: "#6F999A", fillColor: "#6F999A", fillOpacity: 1, weight: 0 }).addTo(map); m.bindTooltip(String(routePoints.length), { permanent: true, direction: "center", className: "route-label" }); routeMarkers.push(m); if (routePoints.length >= 2) { if (routeLine) map.removeLayer(routeLine); routeLine = L.polyline(routePoints.map(p => [p.lat, p.lng]), { color: "#6F999A", weight: 2, dashArray: "8 6", opacity: 0.6 }).addTo(map); } updateRouteUI(); }
@@ -933,7 +984,7 @@ function updateRouteUI() {
         if (closeLoop && routePoints.length >= 2) routePoints.push({ ...routePoints[0] });
     }
     const ready = routePoints.length >= 2;
-    $("btn-route-start").disabled = !ready;
+    $("btn-route-start").disabled = !ready || routeStarting || !!routePolling;
     const save = $("btn-route-save-open");
     if (save) save.disabled = !ready;
     $("route-hint").textContent = ready
@@ -946,9 +997,9 @@ function updateRouteUI() {
 // rather than making people type an address exactly right and hope.
 
 function attachAutocomplete(input, resultsEl, onPick) {
-    let timer = null, items = [], cursor = -1, controller = null;
+    let timer = null, items = [], cursor = -1, controller = null, generation = 0;
 
-    const close = () => { resultsEl.classList.remove("visible"); cursor = -1; };
+    const close = () => { clearTimeout(timer); controller?.abort(); generation += 1; resultsEl.classList.remove("visible"); cursor = -1; };
 
     const render = () => {
         resultsEl.textContent = "";
@@ -980,6 +1031,7 @@ function attachAutocomplete(input, resultsEl, onPick) {
     };
 
     const search = async query => {
+        const requestGeneration = ++generation;
         if (controller) controller.abort();
         controller = new AbortController();
         const centre = map ? map.getCenter() : null;
@@ -989,6 +1041,7 @@ function attachAutocomplete(input, resultsEl, onPick) {
             const response = await fetch("/api/search?" + params, { signal: controller.signal });
             if (!response.ok) return close();
             const data = await response.json();
+            if (requestGeneration !== generation || input.value.trim() !== query) return;
             items = Array.isArray(data) ? data.slice(0, 6) : [];
             cursor = -1;
             render();
@@ -996,7 +1049,8 @@ function attachAutocomplete(input, resultsEl, onPick) {
     };
 
     input.addEventListener("input", () => {
-        clearTimeout(timer);
+        close();
+        items = [];
         const query = input.value.trim();
         if (query.length < 3) return close();
         timer = setTimeout(() => search(query), 220);
@@ -1006,9 +1060,9 @@ function attachAutocomplete(input, resultsEl, onPick) {
         if (!resultsEl.classList.contains("visible")) return;
         if (event.key === "ArrowDown") { event.preventDefault(); cursor = Math.min(cursor + 1, items.length - 1); render(); }
         else if (event.key === "ArrowUp") { event.preventDefault(); cursor = Math.max(cursor - 1, 0); render(); }
-        else if (event.key === "Enter" && cursor >= 0) {
+        else if (event.key === "Enter" && items.length) {
             event.preventDefault();
-            const place = items[cursor];
+            const place = items[Math.max(0, cursor)];
             input.value = place.name || place.display_name;
             close();
             if (onPick) onPick(place);
@@ -1075,6 +1129,7 @@ let mapPickTarget = null;   // null | "append" | stop index
 function setMapPick(target) {
     mapPickTarget = target;
     const armed = target !== null;
+    if (armed && window.innerWidth <= 940) $("map").scrollIntoView({ block: "start", behavior: "smooth" });
     document.body.classList.toggle("map-picking", armed);
     const toggle = $("btn-map-pick");
     if (toggle) {
@@ -1139,7 +1194,9 @@ function renderStopsOnMap(fit = false) {
         marker.bindTooltip(stopLabel(index), {
             permanent: true, direction: "center", className: "route-label",
         });
-        marker.bindPopup(stop.text);
+        const popup = document.createElement("span");
+        popup.textContent = stop.text;
+        marker.bindPopup(popup);
         stopMarkers.push(marker);
     });
 
@@ -1160,7 +1217,7 @@ function renderStopsOnMap(fit = false) {
 // Any change to the stops makes a previously calculated road route wrong.
 // Leaving it in place means Start drives the route you just edited away from.
 function invalidateCalculatedRoute() {
-    if (!calculatedRouteCoordinates) return;
+    clearRouteGeometry();
     calculatedRouteCoordinates = null;
     calculatedRouteProvider = null;
     calculatedRouteSummary = null;
@@ -1614,10 +1671,18 @@ async function continueRoaming() {
 }
 
 async function stopRoaming() {
+    const button = $("btn-roam-stop");
+    if (button.disabled) return;
+    button.disabled = true;
+    try {
+        await requestMutation("/api/route/stop");
+        await requestMutation("/api/wander/stop");
+    } catch (error) {
+        button.disabled = false;
+        return toast(error.message || "Could not stop roaming. Try again.", "error");
+    }
     roamActive = false;
     clearTimeout(roamRetryTimer);
-    try { await fetch("/api/route/stop", { method: "POST" }); } catch (e) { /* already stopped */ }
-    try { await fetch("/api/wander/stop", { method: "POST" }); } catch (e) { /* legacy */ }
     if (roamPathLine) { map.removeLayer(roamPathLine); roamPathLine = null; }
     roamChunkCoords = null;
     roamWalkState = null;
@@ -1794,7 +1859,7 @@ function addStop() {
     renderStops();
 }
 
-function reverseStops() { routeStops.reverse(); renderStops(); }
+function reverseStops() { routeStops.reverse(); invalidateCalculatedRoute(); renderStops(); }
 
 function setBuildMode(mode) {
     if (mode !== "map" && mapPickTarget === "append") setMapPick(null);
@@ -1875,6 +1940,7 @@ function renderCalculatedRouteStatus() {
 
 async function calculateAddressRoute() {
     const status = $("route-address-status");
+    const routeSignature = JSON.stringify({ stops: routeStops, closeLoop });
     const stops = routeStops.map(stop => stop.text.trim()).filter(Boolean);
     if (stops.length < 2) return toast("Enter at least a start and a destination", "error");
     if (closeLoop && stops.length >= 2) stops.push(stops[0]);
@@ -1888,6 +1954,7 @@ async function calculateAddressRoute() {
     try {
         const response = await fetch("/api/route/calculate", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ stops }) });
         const data = await response.json();
+        if (routeSignature !== JSON.stringify({ stops: routeStops, closeLoop })) return toast("Stops changed. Calculate again to use your updated route.", "warning");
         if (!response.ok) { status.className = "route-address-status error"; status.textContent = data.error || "Route calculation failed"; return toast(status.textContent, "error"); }
         drawCalculatedRoute(data, data.legs > 1 ? data.legs + " legs ready" : "Google route ready");
         renderCalculatedRouteStatus();
@@ -1900,7 +1967,10 @@ async function calculateAddressRoute() {
 }
 
 async function startRoute() {
-    if (routePoints.length < 2) return; const speed = routeSpeedKmh(); const mode = $("route-mode").value; const randomize = $("speed-randomize").checked;
+    if (routePoints.length < 2 || $("btn-route-start").disabled) return;
+    routeStarting = true;
+    $("btn-route-start").disabled = true;
+    const speed = routeSpeedKmh(); const mode = $("route-mode").value; const randomize = $("speed-randomize").checked;
     const routeRequest = { waypoints: routePoints, speed, mode, randomize_speed: randomize, coordinates: calculatedRouteCoordinates, provider: calculatedRouteProvider, adaptive: adaptiveSpeed };
     if (calculatedRouteHolds !== null) routeRequest.holds = calculatedRouteHolds;
     try { const r = await fetch("/api/route/start", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(routeRequest) }); const d = await r.json(); if (!r.ok) return toast(d.error || "Route failed", "error");
@@ -1920,12 +1990,27 @@ async function startRoute() {
     $("btn-route-start").disabled = true; $("btn-route-stop").disabled = false; $("btn-route-pause").classList.remove("hidden"); $("btn-route-resume").classList.add("hidden"); $("route-progress").classList.remove("hidden");
     toast("Route started: " + formatRouteDistance(d.distance_km) + " (" + mode + ") · following"); routePolling = setInterval(pollRoute, 1000); await pollPosition(); startMovementTracking();
     } catch (e) { toast("Route error", "error"); }
+    finally { routeStarting = false; if (!routePolling) $("btn-route-start").disabled = routePoints.length < 2; }
 }
 
-async function stopRoute() {
-    roamActive = false; try { await fetch("/api/route/stop", { method: "POST" }); endRoute(); toast("Route stopped"); } catch (e) { toast("Failed", "error"); } }
-async function pauseRoute() { try { await fetch("/api/route/pause", { method: "POST" }); $("btn-route-pause").classList.add("hidden"); $("btn-route-resume").classList.remove("hidden"); toast("Route paused"); } catch (e) { toast("Failed", "error"); } }
-async function resumeRoute() { try { await fetch("/api/route/resume", { method: "POST" }); $("btn-route-resume").classList.add("hidden"); $("btn-route-pause").classList.remove("hidden"); toast("Route resumed"); } catch (e) { toast("Failed", "error"); } }
+async function routeAction(action, message) {
+    const button = $("btn-route-" + action);
+    if (button.disabled) return;
+    button.disabled = true;
+    try {
+        await requestMutation("/api/route/" + action);
+        if (action === "stop") { roamActive = false; endRoute(); }
+        else {
+            $("btn-route-pause").classList.toggle("hidden", action === "pause");
+            $("btn-route-resume").classList.toggle("hidden", action !== "pause");
+        }
+        toast(message);
+    } catch (error) { toast(error.message, "error"); }
+    finally { button.disabled = action === "stop" && !routePolling; }
+}
+async function stopRoute() { return routeAction("stop", "Route stopped"); }
+async function pauseRoute() { return routeAction("pause", "Route paused"); }
+async function resumeRoute() { return routeAction("resume", "Route resumed"); }
 
 // The planned line stays put; a brighter line grows over it as the phone
 // covers ground, so progress is legible on the map itself.
@@ -2078,8 +2163,10 @@ async function pollPosition() {
 const _keyMap = { w: "n", a: "w", s: "s", d: "e", arrowup: "n", arrowdown: "s", arrowleft: "w", arrowright: "e" };
 let _activeKeys = new Set();
 let joystickCommand = Promise.resolve();
+let joystickDirection = null;
 function onKeyDown(e) {
-    const typing = e.target.tagName === "INPUT" || e.target.tagName === "TEXTAREA" || e.target.tagName === "SELECT";
+    if (e.ctrlKey || e.metaKey || e.altKey || e.repeat) return;
+    const typing = e.target.isContentEditable || e.target.tagName === "INPUT" || e.target.tagName === "TEXTAREA" || e.target.tagName === "SELECT";
     // Escape is the way out of a form, so it must survive the typing guard.
     if (typing && e.key !== "Escape") return;
     // Onboarding covers everything, so acting on a shortcut here would change
@@ -2095,8 +2182,7 @@ function onKeyDown(e) {
     const dir = _keyMap[e.key.toLowerCase()]; if (!dir) return; e.preventDefault(); _activeKeys.add(dir); const combined = _combineDirections(); if (combined) joystickMove(combined);
 }
 function onKeyUp(e) {
-    if (e.target.tagName === "INPUT" || e.target.tagName === "TEXTAREA" || e.target.tagName === "SELECT") return;
-    const dir = _keyMap[e.key.toLowerCase()]; if (!dir) return; _activeKeys.delete(dir); if (_activeKeys.size === 0) joystickStop(); else { const combined = _combineDirections(); if (combined) joystickMove(combined); } }
+    const dir = _keyMap[e.key.toLowerCase()]; if (!dir || !_activeKeys.has(dir)) return; _activeKeys.delete(dir); if (_activeKeys.size === 0) joystickStop(); else { const combined = _combineDirections(); if (combined) joystickMove(combined); } }
 function _combineDirections() { const has = d => _activeKeys.has(d); if (has("n") && has("e")) return "ne"; if (has("n") && has("w")) return "nw"; if (has("s") && has("e")) return "se"; if (has("s") && has("w")) return "sw"; if (has("n")) return "n"; if (has("s")) return "s"; if (has("e")) return "e"; if (has("w")) return "w"; return null; }
 
 function deviceReady() {
@@ -2105,8 +2191,10 @@ function deviceReady() {
 }
 
 function joystickMove(direction) {
+    if (joystickDirection === direction) return;
     // Silently doing nothing reads as a broken button.
     if (!deviceReady()) return toast("No iPhone connected", "error");
+    joystickDirection = direction;
     const speed = readSpeedKmh() || selectedSpeed;
     document.querySelectorAll(".joy-btn").forEach(b => b.classList.remove("active"));
     const btn = document.querySelector('.joy-btn[data-dir="' + direction + '"]');
@@ -2115,17 +2203,25 @@ function joystickMove(direction) {
     joystickCommand = joystickCommand.catch(() => {}).then(async () => {
         const r = await fetch("/api/joystick/move", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ direction, speed }) });
         if (!r.ok) throw new Error("Joystick move failed");
+    }).catch(error => {
+        joystickDirection = null;
+        _activeKeys.clear();
+        document.querySelectorAll(".joy-btn").forEach(b => b.classList.remove("active"));
+        if (!routePolling && !roamActive) stopMovementTracking();
+        toast(error.message || "Could not move the device", "error");
     });
     return joystickCommand;
 }
 
 function joystickStop() {
+    joystickDirection = null;
+    _activeKeys.clear();
     document.querySelectorAll(".joy-btn").forEach(b => b.classList.remove("active"));
     joystickCommand = joystickCommand.catch(() => {}).then(async () => {
-        await fetch("/api/joystick/stop", { method: "POST" });
+        await requestMutation("/api/joystick/stop");
         await pollPosition();
-        stopMovementTracking();
-    });
+        if (!routePolling && !roamActive) stopMovementTracking();
+    }).catch(error => toast(error.message || "Could not stop movement", "error"));
     return joystickCommand;
 }
 
@@ -2222,7 +2318,7 @@ function dismissStealthBanner() { $("stealth-banner").classList.add("hidden"); _
 async function loadProfiles() {
     try { const r = await fetch("/api/profiles"); const profiles = await r.json(); const c = $("profile-list"); c.textContent = "";
     if (!profiles.length) { const e = document.createElement("div"); e.className = "empty-state"; e.textContent = "No profiles"; c.appendChild(e); return; }
-    profiles.forEach(p => { const item = document.createElement("div"); item.className = "saved-item"; const n = document.createElement("span"); n.className = "saved-name"; n.textContent = p.name; const co = document.createElement("span"); co.className = "saved-coords"; co.textContent = (p.lat != null ? p.lat.toFixed(2) : "--") + ", " + (p.lon != null ? p.lon.toFixed(2) : "--"); const del = document.createElement("button"); del.className = "saved-del"; del.title = "Delete"; del.textContent = "\u00D7"; del.addEventListener("click", async e => { e.stopPropagation(); await fetch("/api/profiles/" + encodeURIComponent(p.name), { method: "DELETE" }); loadProfiles(); toast('Deleted "' + p.name + '"'); }); item.appendChild(n); item.appendChild(co); item.appendChild(del); item.addEventListener("click", async e => { if (e.target.classList.contains("saved-del")) return; try { const r2 = await fetch("/api/profiles/" + encodeURIComponent(p.name) + "/load", { method: "POST" }); const d = await r2.json(); if (r2.ok) { toast('Profile "' + p.name + '" loaded'); if (d.profile?.lat != null) { placeMarker(d.profile.lat, d.profile.lon); map.flyTo([d.profile.lat, d.profile.lon], 15); } } else toast(d.error || "Failed", "error"); } catch (e2) { toast("Error", "error"); } }); c.appendChild(item); });
+    profiles.forEach(p => { const item = document.createElement("div"); item.className = "saved-item"; makeItemAccessible(item); const n = document.createElement("span"); n.className = "saved-name"; n.textContent = p.name; const co = document.createElement("span"); co.className = "saved-coords"; co.textContent = (p.lat != null ? p.lat.toFixed(2) : "--") + ", " + (p.lon != null ? p.lon.toFixed(2) : "--"); const del = document.createElement("button"); del.className = "saved-del"; del.title = "Delete"; del.textContent = "\u00D7"; del.addEventListener("click", async e => { e.stopPropagation(); await deleteSavedItem(del, "/api/profiles/" + encodeURIComponent(p.name), loadProfiles, 'Deleted "' + p.name + '"'); }); item.appendChild(n); item.appendChild(co); item.appendChild(del); item.addEventListener("click", async e => { if (e.target.classList.contains("saved-del")) return; try { const r2 = await fetch("/api/profiles/" + encodeURIComponent(p.name) + "/load", { method: "POST" }); const d = await r2.json(); if (r2.ok) { toast('Profile "' + p.name + '" loaded'); if (Number.isFinite(d.profile?.speed)) setSelectedSpeed(d.profile.speed); if (d.profile?.route_mode) $("route-mode").value = d.profile.route_mode; if (coordsInRange(d.profile?.lat, d.profile?.lon)) { activeSpoofLocation = { lat: d.profile.lat, lon: d.profile.lon }; placeMarker(d.profile.lat, d.profile.lon); adoptDotAsRoamCentre(true); map.flyTo([d.profile.lat, d.profile.lon], 15); } } else toast(d.error || "Failed", "error"); } catch (e2) { toast("Error", "error"); } }); c.appendChild(item); });
     } catch (e) {}
 }
 function revealForm(id) {
@@ -2234,25 +2330,85 @@ function revealForm(id) {
 
 function showProfileForm() { $("profile-form").classList.remove("hidden");
     revealForm("profile-form"); $("profile-name").value = ""; $("profile-name").focus(); }
-async function confirmSaveProfile() { const name = $("profile-name").value.trim(); if (!name) return toast("Enter a name", "error"); const lat = parseFloat($("lat-input").value), lon = parseFloat($("lon-input").value); try { const r = await fetch("/api/profiles", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ name, lat: isNaN(lat) ? null : lat, lon: isNaN(lon) ? null : lon, speed: readSpeedKmh() || selectedSpeed, route_mode: $("route-mode").value }) }); if (r.ok) { loadProfiles(); toast('Profile "' + name + '" saved'); $("profile-form").classList.add("hidden"); } else { const d = await r.json(); toast(d.error || "Failed", "error"); } } catch (e) { toast("Error", "error"); } }
+async function confirmSaveProfile() { const name = $("profile-name").value.trim(); if (!name) return toast("Enter a name", "error"); const lat = parseFloat($("lat-input").value), lon = parseFloat($("lon-input").value); if (($("lat-input").value || $("lon-input").value) && !coordsInRange(lat, lon)) return toast("Choose valid coordinates or clear both fields", "error"); try { const r = await fetch("/api/profiles", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ name, lat: isNaN(lat) ? null : lat, lon: isNaN(lon) ? null : lon, speed: readSpeedKmh() || selectedSpeed, route_mode: $("route-mode").value }) }); if (r.ok) { loadProfiles(); toast('Profile "' + name + '" saved'); $("profile-form").classList.add("hidden"); } else { const d = await r.json(); toast(d.error || "Failed", "error"); } } catch (e) { toast("Error", "error"); } }
 
 // ── Schedules ───────────────────────────────────────────────
+async function toggleSchedule(button, schedule) {
+    if (button.disabled) return;
+    const enabled = schedule.enabled === false;
+    button.disabled = true;
+    try {
+        await requestMutation("/api/schedules/" + encodeURIComponent(schedule.id) + "/toggle", {
+            headers: { "Content-Type": "application/json" }, body: JSON.stringify({ enabled }),
+        });
+        await loadSchedules();
+        toast(enabled ? "Schedule enabled" : "Schedule paused");
+    } catch (error) { toast(error.message, "error"); }
+    finally { button.disabled = false; }
+}
+
 async function loadSchedules() {
-    try { const r = await fetch("/api/schedules"); const schedules = await r.json(); const c = $("schedule-list"); c.textContent = "";
-    if (!schedules.length) { const e = document.createElement("div"); e.className = "empty-state"; e.textContent = "No schedules"; c.appendChild(e); return; }
-    schedules.forEach(s => { const item = document.createElement("div"); item.className = "saved-item"; const n = document.createElement("span"); n.className = "saved-name"; const dayLabel = s.days?.length ? s.days.map(d => d[0].toUpperCase() + d.slice(1)).join(", ") : "Daily"; n.textContent = s.name + " @ " + s.time; const co = document.createElement("span"); co.className = "saved-coords"; co.textContent = dayLabel + " · " + s.lat.toFixed(2) + ", " + s.lon.toFixed(2); const del = document.createElement("button"); del.className = "saved-del"; del.title = "Delete"; del.textContent = "\u00D7"; del.addEventListener("click", async e => { e.stopPropagation(); await fetch("/api/schedules/" + encodeURIComponent(s.id), { method: "DELETE" }); loadSchedules(); toast("Schedule deleted"); }); item.appendChild(n); item.appendChild(co); item.appendChild(del); c.appendChild(item); });
-    } catch (e) {}
+    const container = $("schedule-list");
+    try {
+        const response = await fetch("/api/schedules");
+        if (!response.ok) throw new Error("Could not load schedules");
+        const schedules = await response.json();
+        container.textContent = "";
+        if (!schedules.length) {
+            const empty = document.createElement("div");
+            empty.className = "empty-state";
+            empty.textContent = "No schedules yet. Choose a location, then add a time.";
+            container.appendChild(empty);
+            return;
+        }
+        schedules.forEach(schedule => {
+            const item = document.createElement("div");
+            item.className = "saved-item";
+            const name = document.createElement("span");
+            name.className = "saved-name";
+            name.textContent = schedule.name + " @ " + schedule.time;
+            const details = document.createElement("span");
+            details.className = "saved-coords";
+            const days = schedule.days?.length ? schedule.days.map(day => day[0].toUpperCase() + day.slice(1)).join(", ") : "Daily";
+            const enabled = schedule.enabled !== false;
+            details.textContent = (enabled ? "" : "Paused · ") + days + " · " + schedule.lat.toFixed(2) + ", " + schedule.lon.toFixed(2);
+            const toggle = document.createElement("button");
+            toggle.type = "button";
+            toggle.className = "icon-btn";
+            toggle.textContent = enabled ? "Pause" : "Enable";
+            toggle.setAttribute("aria-label", (enabled ? "Pause " : "Enable ") + schedule.name);
+            toggle.addEventListener("click", () => toggleSchedule(toggle, schedule));
+            const remove = document.createElement("button");
+            remove.type = "button";
+            remove.className = "saved-del";
+            remove.textContent = "×";
+            remove.setAttribute("aria-label", "Delete " + schedule.name);
+            remove.addEventListener("click", () => deleteSavedItem(remove, "/api/schedules/" + encodeURIComponent(schedule.id), loadSchedules, "Schedule deleted"));
+            item.append(name, details, toggle, remove);
+            container.appendChild(item);
+        });
+    } catch (error) {
+        container.textContent = "Could not load schedules. ";
+        const retry = document.createElement("button");
+        retry.type = "button";
+        retry.className = "icon-btn";
+        retry.textContent = "Retry";
+        retry.addEventListener("click", loadSchedules);
+        container.appendChild(retry);
+    }
 }
 function showScheduleForm() { const lat = parseFloat($("lat-input").value), lon = parseFloat($("lon-input").value); if (isNaN(lat) || isNaN(lon)) return toast("Set a location first", "error"); $("schedule-form").classList.remove("hidden");
     setTimeout(() => revealForm("schedule-form"), 0); $("schedule-name").value = ""; $("schedule-name").focus(); }
-async function confirmAddSchedule() { const name = $("schedule-name").value.trim(); if (!name) return toast("Enter a name", "error"); const time = $("schedule-time").value; if (!time) return toast("Set a time", "error"); const lat = parseFloat($("lat-input").value), lon = parseFloat($("lon-input").value); const days = Array.from(document.querySelectorAll(".day-pill.active")).map(p => p.dataset.day); try { const r = await fetch("/api/schedules", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ name, lat, lon, time, days }) }); if (r.ok) { loadSchedules(); toast("Schedule created"); $("schedule-form").classList.add("hidden"); } else { const d = await r.json(); toast(d.error || "Failed", "error"); } } catch (e) { toast("Error", "error"); } }
+async function confirmAddSchedule() { const name = $("schedule-name").value.trim(); if (!name) return toast("Enter a name", "error"); const time = $("schedule-time").value; if (!time) return toast("Set a time", "error"); const lat = parseFloat($("lat-input").value), lon = parseFloat($("lon-input").value); if (!coordsInRange(lat, lon)) return toast("Choose a valid location before scheduling", "error"); const days = Array.from(document.querySelectorAll(".day-pill.active")).map(p => p.dataset.day); try { const r = await fetch("/api/schedules", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ name, lat, lon, time, days }) }); if (r.ok) { loadSchedules(); toast("Schedule created"); $("schedule-form").classList.add("hidden"); } else { const d = await r.json(); toast(d.error || "Failed", "error"); } } catch (e) { toast("Error", "error"); } }
 
 // ── Route History ───────────────────────────────────────────
 async function loadRouteHistory() {
     try { const r = await fetch("/api/routes"); const routes = await r.json(); const c = $("route-history-list"); c.textContent = "";
     if (!routes.length) { const e = document.createElement("div"); e.className = "empty-state"; e.textContent = "No saved routes"; c.appendChild(e); return; }
-    routes.forEach(rt => { const item = document.createElement("div"); item.className = "saved-item"; const n = document.createElement("span"); n.className = "saved-name"; n.textContent = rt.name; const co = document.createElement("span"); co.className = "saved-coords"; co.textContent = rt.distance_km != null ? formatRouteDistance(rt.distance_km) : "?"; const del = document.createElement("button"); del.className = "saved-del"; del.title = "Delete"; del.textContent = "\u00D7"; del.addEventListener("click", async e => { e.stopPropagation(); await fetch("/api/routes/" + encodeURIComponent(rt.id), { method: "DELETE" }); loadRouteHistory(); toast("Route deleted"); }); item.appendChild(n); item.appendChild(co); item.appendChild(del); item.addEventListener("click", e => { if (e.target.classList.contains("saved-del")) return; if (rt.waypoints && rt.waypoints.length >= 2) {
+    routes.forEach(rt => { const item = document.createElement("div"); item.className = "saved-item"; makeItemAccessible(item); const n = document.createElement("span"); n.className = "saved-name"; n.textContent = rt.name; const co = document.createElement("span"); co.className = "saved-coords"; co.textContent = rt.distance_km != null ? formatRouteDistance(rt.distance_km) : "?"; const del = document.createElement("button"); del.className = "saved-del"; del.title = "Delete"; del.textContent = "\u00D7"; del.addEventListener("click", async e => { e.stopPropagation(); await deleteSavedItem(del, "/api/routes/" + encodeURIComponent(rt.id), loadRouteHistory, "Route deleted"); }); item.appendChild(n); item.appendChild(co); item.appendChild(del); item.addEventListener("click", e => { if (e.target.classList.contains("saved-del")) return; if (rt.waypoints && rt.waypoints.length >= 2) {
             clearRoutePoints();
+            if (Number.isFinite(rt.speed)) setSelectedSpeed(rt.speed);
+            if (rt.mode) $("route-mode").value = rt.mode;
             routeStops = rt.waypoints.slice(0, 10).map(wp => {
                 const label = wp.lat.toFixed(5) + ", " + wp.lng.toFixed(5);
                 return { text: label, place: { name: label, display_name: label, lat: wp.lat, lon: wp.lng } };

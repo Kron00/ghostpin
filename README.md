@@ -127,6 +127,17 @@ Search uses Google Maps' keyless web autocomplete as its primary place source.
 Because that endpoint is unofficial, Photon and Nominatim run as automatic
 fallbacks if Google changes or throttles it.
 
+Saved profiles and routes restore their speed and playback mode. Schedules can
+be paused and enabled individually; they run while Ghostpin is open with a
+connected device. Saved places, profiles, schedules, and route planning remain
+available before connecting a phone. GPX import and circular route generation
+are also available offline through the local API.
+
+Use Tab and Enter to open saved items, and Enter to submit a save form. Joystick
+movement stops when you release the pointer or the app loses focus. In narrow
+windows, the map stays above the controls so you can scroll between the map and
+the workspace.
+
 ## Privacy
 
 Ghostpin has no backend, no account, and no telemetry. Nothing is sent to any
@@ -236,6 +247,25 @@ dist/Ghostpin-2.2.1.dmg
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for the full contributor guide, including
 the rule against committing device screenshots.
+
+Run the automated regression checks after installing dependencies (the
+JavaScript checks also require Node.js):
+
+```bash
+.venv/bin/python -m unittest discover -s tests -v
+node tests/test_interactions.cjs
+```
+
+For browser QA without a phone, launch the isolated preview:
+
+```bash
+GHOSTPIN_PREVIEW_PORT=18765 .venv/bin/python tests/run_preview.py
+```
+
+Open `http://127.0.0.1:18765`. This uses the real app and movement engine with a
+simulated device, temporary saved data, and fixed Paris search/routing results.
+It never connects to an iPhone. Basemap tiles still need internet access. This
+preview supplements actual USB/Wi-Fi and on-device location testing.
 
 ### Publishing updates
 
