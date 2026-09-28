@@ -195,9 +195,6 @@ document.addEventListener("DOMContentLoaded", async () => {
     // imply that iOS cannot identify a software-simulated position.
     $("btn-stealth").title = "Location consistency guide";
     $("btn-stealth").setAttribute("aria-label", "Open location consistency guide");
-    $("status-stealth-text").textContent = "Check not run";
-    $("status-stealth-dot").className = "status-dot";
-    $("status-stealth").title = "Compares the simulated location, IP-based location, and approximate timezone";
     if (!localStorage.getItem("ob_done")) {
         $("onboarding").classList.remove("hidden");
     } else {
@@ -406,7 +403,6 @@ document.addEventListener("DOMContentLoaded", async () => {
     $("tips-overlay").addEventListener("click", e => { if (e.target === $("tips-overlay")) toggleTips(); });
     $("stealth-banner-close").addEventListener("click", dismissStealthBanner);
     $("stealth-banner-tip").addEventListener("click", () => { dismissStealthBanner(); toggleTips(); });
-    $("status-stealth")?.addEventListener("click", toggleTips);
 
     // Device dropdown & connect buttons
     $("device-badge").addEventListener("click", toggleDeviceDropdown);
@@ -911,7 +907,6 @@ async function pollDevice() {
             $("dev-ios").textContent = d.ios_version || "--"; $("dev-model").textContent = d.model || "--"; $("dev-udid").textContent = maskUdid(d.udid);
             const cb = $("dev-conn"); cb.textContent = ct; cb.className = "conn-badge " + ct.toLowerCase();
             $("device-info-compact")?.classList.remove("hidden"); $("setup-guide")?.classList.add("hidden");
-            if ($("status-conn-text")) $("status-conn-text").textContent = ct;
             if (!wasConnected) { wasConnected = true; toast("iPhone connected (" + ct + ")"); }
         } else {
             dot.classList.remove("connected", "degraded"); $("device-label").textContent = "No device";
@@ -920,7 +915,7 @@ async function pollDevice() {
             setReadinessValue("dev-ddi", "Unavailable", "error");
             setReadinessValue("dev-tunnel", "Unavailable", "error");
             $("device-info-compact")?.classList.add("hidden"); $("setup-guide")?.classList.remove("hidden");
-            if ($("status-conn-text")) $("status-conn-text").textContent = "No iPhone"; wasConnected = false;
+            wasConnected = false;
             // Auto-connect on first poll if tunnel is running
             if (!_autoConnectAttempted && !d.connecting) { _autoConnectAttempted = true; autoConnect(); }
         }
@@ -2335,9 +2330,6 @@ async function checkStealth() {
         if (!r.ok) throw new Error("Location consistency check failed");
         const d = await r.json();
         const banner = $("stealth-banner");
-        const stealthPill = $("status-stealth");
-        const stealthText = $("status-stealth-text");
-        const stealthDot = $("status-stealth-dot");
         const checkAvailable = d.check_available === true;
         const warnings = Array.isArray(d.warnings) ? d.warnings.slice() : [];
 
@@ -2355,23 +2347,6 @@ async function checkStealth() {
             }
         }
 
-        if (stealthPill) {
-            if (!checkAvailable) {
-                stealthText.textContent = d.unavailable_reason === "no_location" ? "Check not run" : "Check unavailable";
-                stealthDot.className = "status-dot degraded";
-                stealthPill.title = "Location consistency check could not run";
-            } else if (!warnings.length) {
-                stealthText.textContent = "Location consistent";
-                stealthDot.className = "status-dot connected";
-                stealthPill.title = "Simulated location, IP-based location, and approximate timezone are consistent; this does not test iOS simulation flags";
-            } else {
-                const hasHigh = warnings.some(w => w.severity === "high");
-                stealthText.textContent = hasHigh ? "Location mismatch" : "Check warning";
-                stealthDot.className = "status-dot degraded";
-                stealthPill.title = "The location consistency check found a mismatch; this does not test iOS simulation flags";
-            }
-        }
-
         if (_stealthDismissed) return;
         if (!checkAvailable) {
             if (d.unavailable_reason === "no_location") { banner.classList.add("hidden"); return; }
@@ -2385,9 +2360,7 @@ async function checkStealth() {
         banner.classList.remove("hidden");
         banner.className = "stealth-banner-" + sorted[0].severity;
     } catch (e) {
-        if ($("status-stealth-text")) $("status-stealth-text").textContent = "Check unavailable";
-        if ($("status-stealth-dot")) $("status-stealth-dot").className = "status-dot degraded";
-        if ($("status-stealth")) $("status-stealth").title = "Location consistency check could not run";
+        // Keep the existing banner if this background lookup temporarily fails.
     }
 }
 

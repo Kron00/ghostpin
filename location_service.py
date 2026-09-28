@@ -1493,6 +1493,16 @@ class LocationService:
         lookahead = min(stop_distance, distance + speed * elapsed
                         + 0.5 * MAX_ACCEL_MS2 * elapsed ** 2)
         ahead = self._plan_state_at_time(plan, self._plan_time_at_distance(plan, lookahead))
+        if stop_at_end and lookahead >= stop_distance and speed <= 0.000001:
+            # At a slow cadence the probe can reach the zero-speed endpoint
+            # while we are still centimetres short of it. Taking that zero as
+            # our target leaves us stationary forever, outside the arrival
+            # tolerance. Integrate a short accelerate/brake segment instead.
+            terminal = self._build_motion_segment(remaining, 0.0, 0.0, ahead["ceiling"])
+            step, next_speed = self._motion_segment_state(terminal, elapsed)
+            if elapsed >= terminal["duration"]:
+                step, next_speed = remaining, 0.0
+            return self._plan_time_at_distance(plan, distance + step), next_speed
         desired = ahead["speed"] * min(1.0, max(0.0, factor))
         next_speed = max(speed - MAX_DECEL_MS2 * elapsed,
                          min(desired, speed + MAX_ACCEL_MS2 * elapsed))
