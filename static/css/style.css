@@ -190,12 +190,7 @@ select:focus-visible { outline: none; }
     white-space: nowrap;
     color: var(--text);
 }
-/* The icon art is a squircle on a cream card; crop to the squircle. */
-.brand-lockup img {
-    width: 28px; height: 28px;
-    clip-path: inset(8.5% round 22%);
-    scale: 1.2;
-}
+.brand-lockup img { width: 28px; height: 28px; display: block; border-radius: 7px; box-shadow: 0 0 0 1px var(--border-strong); }
 
 /* ── Search ──────────────────────────────────────────────────── */
 
@@ -1724,7 +1719,7 @@ button.status-pill:hover { background: var(--surface-hover); color: var(--text);
 
 /* ── Markers ─────────────────────────────────────────────────── */
 
-/* The simulated position: the cream pin from the icon, standing on a
+/* The simulated position: the ghost pin from the icon, standing on a
    soft ground ring. */
 .map-marker { position: relative; width: 30px; height: 40px; }
 .map-marker-pin {
@@ -1737,7 +1732,7 @@ button.status-pill:hover { background: var(--surface-hover); color: var(--text);
     transform-origin: 50% 100%;
 }
 .map-marker-pin path { fill: var(--accent); stroke: rgba(20, 25, 34, 0.55); stroke-width: 1.2; }
-.map-marker-pin circle { fill: #34566F; }
+.map-marker-pin ellipse { fill: #131C2A; }
 .map-marker-shadow {
     position: absolute;
     left: 50%; bottom: -1px;
@@ -2063,7 +2058,7 @@ kbd {
     animation: ob-pin-drop 0.9s var(--ease-out) 0.15s both;
 }
 .ob-pin path { fill: var(--accent); }
-.ob-pin circle { fill: #34566F; }
+.ob-pin ellipse { fill: #131C2A; }
 .ob-ripple {
     position: absolute;
     left: 50%; top: 92px;

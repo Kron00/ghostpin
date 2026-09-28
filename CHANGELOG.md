@@ -35,6 +35,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Replace the app icon with a minimal ghost pin: a cream pin with two eyes on
+  slate night, kept as editable `icon.svg`. The map marker and onboarding use
+  the same pin.
 - Rework the interface into a single dark design drawn from the app icon:
   slate-night glass panels, a cream accent reserved for Warp, active modes,
   the pin, and routes, and sage for live and healthy states.

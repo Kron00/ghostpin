@@ -168,9 +168,9 @@ const MAP_INK = {
     travelled: "#7CCBB2",
 };
 
-// The pin from the app icon, anchored at its tip.
+// The ghost pin from the app icon, anchored at its tip.
 const PIN_ICON_HTML = '<div class="map-marker"><span class="map-marker-pulse"></span><span class="map-marker-shadow"></span>'
-    + '<svg class="map-marker-pin" viewBox="0 0 40 52" aria-hidden="true"><path d="M20 2C10.1 2 2 9.9 2 19.7 2 32.6 20 50 20 50s18-17.4 18-30.3C38 9.9 29.9 2 20 2z"/><circle cx="20" cy="19.5" r="6.5"/></svg></div>';
+    + '<svg class="map-marker-pin" viewBox="0 0 40 52" aria-hidden="true"><path d="M20 2C10.1 2 2 9.9 2 19.7 2 32.6 20 50 20 50s18-17.4 18-30.3C38 9.9 29.9 2 20 2z"/><ellipse cx="15.4" cy="19.4" rx="2.5" ry="3.3"/><ellipse cx="24.6" cy="19.4" rx="2.5" ry="3.3"/></svg></div>';
 
 const POPULAR = [
     { name: "Times Square, NYC", lat: 40.7580, lon: -73.9855 },
