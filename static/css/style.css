@@ -55,7 +55,7 @@
     --danger-bg: rgba(240, 141, 126, 0.13);
 
     /* Geometry */
-    --r-lg: 14px;
+    --r-lg: 16px;
     --r-md: 10px;
     --r-sm: 7px;
     --r-xs: 5px;
@@ -72,6 +72,7 @@
     --t-meta: 11.5px;
     --t-sm: 12px;
     --t-base: 13px;
+    color-scheme: dark;
     --t-lg: 15px;
     --t-readout: 20px;
 
@@ -85,6 +86,7 @@
 /* ── Light theme: tokens only, never component rules ─────────── */
 
 body.light {
+    color-scheme: light;
     --bg: #DFE7E2;
     --surface: rgba(252, 253, 251, 0.95);
     --surface-solid: #FBFCFA;
@@ -626,6 +628,7 @@ body {
     user-select: none;
     flex-shrink: 0;
     border-bottom: 1px solid var(--border);
+    background: var(--surface-sunken);
     color: var(--text-secondary);
 }
 .hud-panel-header:hover { color: var(--text); }
@@ -639,7 +642,7 @@ body {
 }
 
 .hud-panel-close {
-    width: 20px; height: 20px;
+    width: 28px; height: 28px;
     display: grid; place-items: center;
     background: none;
     border: none;
@@ -670,7 +673,8 @@ body {
 
 /* Grouping inside panels. Replaces stacks of hairline dividers —
    a heading says what a group is, a rule only says "something changed". */
-.panel-section { display: flex; flex-direction: column; gap: 7px; }
+.panel-section { display: flex; flex-direction: column; gap: 9px; }
+.panel-section + .panel-section { padding-top: 14px; border-top: 1px solid var(--border); }
 
 .panel-section-title {
     display: flex;
@@ -859,7 +863,7 @@ body {
     align-items: center;
     justify-content: center;
     gap: 6px;
-    height: 30px;
+    height: 34px;
     padding: 0 12px;
     border: 1px solid transparent;
     border-radius: var(--r-sm);
@@ -897,7 +901,7 @@ body {
 }
 .btn-red:not(:disabled):hover { background: var(--danger); color: var(--accent-ink); }
 
-.btn-xs { height: 26px; padding: 0 9px; font-size: var(--t-meta); }
+.btn-xs { height: 30px; padding: 0 9px; font-size: var(--t-meta); }
 
 /* Only stretch to fill when buttons are laid out in a row together. */
 .btn-group > .btn { flex: 1 1 auto; }
@@ -1058,7 +1062,10 @@ body {
 .saved-del:hover { background: var(--danger-bg); color: var(--danger); }
 
 .empty-state {
-    padding: 14px 8px;
+    padding: 20px 12px;
+    border: 1px dashed var(--border-strong);
+    border-radius: var(--r-sm);
+    background: var(--surface-sunken);
     text-align: center;
     font-size: var(--t-meta);
     color: var(--text-tertiary);
@@ -1134,8 +1141,9 @@ body {
     flex-shrink: 0;
 }
 #speed-input {
-    width: 46px;
-    padding: 4px 6px;
+    width: 80px;
+    min-height: 34px;
+    padding: 6px 8px;
     text-align: right;
     font-size: var(--t-meta);
 }
@@ -1761,7 +1769,7 @@ kbd {
     z-index: 4000;
     display: grid;
     place-items: center;
-    background: var(--bg);
+    background: radial-gradient(ellipse at 50% 20%, var(--surface-raised), var(--bg) 70%);
     padding: 24px;
     overflow-y: auto;
 }
@@ -1898,50 +1906,87 @@ kbd {
 }
 
 @media (max-width: 940px) {
-    /* There is no room for two columns beside the map, so the panels leave
-       fixed positioning entirely and stack in document order over a map that
-       stays put. The !important flags override the inline top/max-height that
-       positionPlacesPanel() sets for the two-column layout. */
-    body { overflow-y: auto; overflow-x: hidden; }
-
+    /* Give the map its own space before the panels instead of covering it
+       with a column of opaque cards. Flex order preserves existing DOM IDs. */
+    body { display: flex; flex-direction: column; overflow-y: auto; overflow-x: hidden; }
+    #map {
+        position: relative;
+        order: -1;
+        top: auto;
+        flex: 0 0 auto;
+        height: 46vh;
+        min-height: 280px;
+        max-height: 480px;
+        margin-top: var(--topbar-h);
+        border-bottom: 1px solid var(--border);
+    }
     .hud-panel {
         position: relative;
         top: auto !important;
         left: auto; right: auto;
         width: auto;
+        flex-shrink: 0;
         max-height: none !important;
-        margin: 0 12px 10px;
+        margin: 0 12px 12px;
     }
-    #panel-location { margin-top: calc(var(--topbar-h) + 10px); }
+    #panel-location { margin-top: 12px; }
     .hud-panel-body { overflow-y: visible; }
-
-    /* Clear the fixed status bar at the end of the scroll. */
-    #panel-movement { margin-bottom: 62px; }
-
-    #stealth-banner { max-width: calc(100vw - 24px); }
+    #stealth-banner { max-width: calc(100vw - 24px); top: calc(var(--topbar-h) + 60px); }
     .brand-lockup span { display: none; }
     #status-bar {
         position: static;
+        order: 1;
         transform: none;
-        margin: 0 12px 12px;
+        flex-shrink: 0;
+        align-self: center;
+        margin: 0 12px 16px;
         max-width: calc(100vw - 24px);
         overflow-x: auto;
     }
     #toasts { right: 12px; left: 12px; align-items: center; }
     #coord-hud { display: none; }
-    /* Panels are full width and in normal flow here, so anything pinned to the
-       bottom of the viewport sits on top of them. Park these in the gap above
-       the first panel instead: visible without scrolling, overlapping nothing.
-       They come last in the DOM, so they must be positioned rather than flowed. */
     #map-controls {
         position: absolute;
-        top: calc(var(--topbar-h) + 10px);
+        top: calc(var(--topbar-h) + 12px);
         right: 12px;
         bottom: auto;
         transform: none;
         flex-direction: row;
     }
-    #panel-location { margin-top: calc(var(--topbar-h) + 56px); }
+    .map-btn { width: 40px; height: 40px; }
+    #search-results { max-height: min(380px, 60vh); }
+}
+
+@media (max-width: 680px) {
+    :root { --topbar-h: 110px; }
+    #topbar { flex-wrap: wrap; align-content: center; gap: 8px; padding: 8px 12px; }
+    .topbar-left { flex-basis: 100%; gap: 10px; }
+    .search-container { max-width: none; }
+    #search-input { height: 38px; font-size: 14px; }
+    .topbar-right {
+        width: 100%;
+        min-width: 0;
+        overflow-x: auto;
+        padding: 2px;
+        scrollbar-width: thin;
+    }
+    .topbar-right > * { flex-shrink: 0; }
+    #device-badge { margin-left: auto; }
+    .teleport-btn { min-height: 34px; }
+    #device-dropdown { max-width: calc(100vw - 24px); }
+    .hud-panel-body { padding: 14px; gap: 12px; }
+    .btn, .btn-xs, .mode-tab, .tab-btn { min-height: 38px; }
+    .coord-row input, .form-input, .route-address-input { min-height: 40px; font-size: 16px; }
+    .ob-card { padding: 24px 20px 20px; }
+    #onboarding { padding: 16px; }
+    .tips-item { flex-wrap: wrap; gap: 5px; }
+}
+
+/* Hover-only actions otherwise disappear on a touch screen. */
+@media (hover: none) {
+    .saved-del { opacity: 1; width: 32px; height: 32px; }
+    .icon-btn { min-width: 30px; min-height: 30px; }
+    .joy-btn { touch-action: none; }
 }
 
 /* ── Speed field, roam slider, and the builder help ──────────── */
@@ -2047,4 +2092,8 @@ body.light #build-help { background: rgba(16, 48, 46, 0.34); }
 .help-item em { color: var(--text); font-style: normal; font-weight: 600; }
 
 /* Darken only the basemap; route colors, pins, and controls stay unchanged. */
-.map-tiles-dark { filter: invert(1) hue-rotate(180deg) brightness(0.85) saturate(0.7); }
+.map-tiles-dark { filter: invert(1) grayscale(1) sepia(0.25) hue-rotate(125deg) saturate(0.65) brightness(0.9) contrast(0.86); }
+
+/* Firefox uses separate range pseudo-elements. */
+.slider::-moz-range-track { height: 3px; border-radius: 100px; background: var(--border-strong); }
+.slider::-moz-range-thumb { width: 13px; height: 13px; border-radius: 50%; background: var(--accent); border: 2px solid var(--surface-solid); }

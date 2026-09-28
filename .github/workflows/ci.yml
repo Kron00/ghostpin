@@ -64,6 +64,11 @@ jobs:
       - name: Regression tests
         run: python -m unittest discover -s tests -v
 
+      - name: Frontend interaction regressions
+        run: |
+          node --check static/js/app.js
+          node tests/test_interactions.cjs
+
   shellcheck:
     name: Shell scripts
     runs-on: ubuntu-latest

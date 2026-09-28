@@ -10,7 +10,7 @@
 <body>
 
 <!-- ═══ Onboarding overlay ═══ -->
-<div id="onboarding">
+<div id="onboarding" role="dialog" aria-modal="true" aria-label="Set up Ghostpin">
     <div class="ob-card">
         <div class="ob-page" id="ob-page-1">
             <div class="ob-icon"><img src="/static/icon.png" alt="" /></div>
@@ -111,7 +111,7 @@
         </div>
         <div class="search-container">
             <svg class="search-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
-            <input type="text" id="search-input" placeholder="Search Google Maps, addresses, or coordinates..." autocomplete="off" />
+            <input type="text" id="search-input" placeholder="Search places, addresses, or coordinates…" aria-label="Search places, addresses, or coordinates" autocomplete="off" />
             <div id="search-results"></div>
         </div>
     </div>
@@ -149,7 +149,7 @@
 </div>
 
 <!-- ═══ HUD: Location Panel (left) ═══ -->
-<div id="panel-location" class="hud-panel hud-panel-left">
+<div id="panel-location" role="region" aria-label="Location" class="hud-panel hud-panel-left">
     <div class="hud-panel-header" data-panel="panel-location">
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0118 0z"/><circle cx="12" cy="10" r="3"/></svg>
         <span>LOCATION</span>
@@ -185,12 +185,12 @@
         <!-- Coordinate inputs -->
         <div id="coord-inputs">
             <div class="coord-row">
-                <label>Lat</label>
-                <input type="number" id="lat-input" step="any" placeholder="0.000000" />
+                <label for="lat-input">Lat</label>
+                <input type="number" id="lat-input" min="-90" max="90" step="any" aria-label="Latitude" placeholder="0.000000" />
             </div>
             <div class="coord-row">
-                <label>Lon</label>
-                <input type="number" id="lon-input" step="any" placeholder="0.000000" />
+                <label for="lon-input">Lon</label>
+                <input type="number" id="lon-input" min="-180" max="180" step="any" aria-label="Longitude" placeholder="0.000000" />
                 <button id="btn-paste" class="btn-inline" title="Paste">Paste</button>
             </div>
         </div>
@@ -208,7 +208,7 @@
         <div id="save-form" class="inline-form hidden">
             <div class="section-divider"></div>
             <div class="inline-form-title">SAVE LOCATION</div>
-            <input type="text" id="save-name" class="form-input" placeholder="Location name..." />
+            <input type="text" id="save-name" aria-label="Location name" class="form-input" placeholder="Location name..." />
             <div class="category-pills">
                 <button class="cat-pill active" data-cat="default">Favorite</button>
                 <button class="cat-pill" data-cat="work">Work</button>
@@ -223,8 +223,8 @@
         <div id="schedule-form" class="inline-form hidden">
             <div class="section-divider"></div>
             <div class="inline-form-title">ADD SCHEDULE</div>
-            <input type="text" id="schedule-name" class="form-input" placeholder="Schedule name..." />
-            <input type="time" id="schedule-time" class="form-input" value="08:00" />
+            <input type="text" id="schedule-name" aria-label="Schedule name" class="form-input" placeholder="Schedule name..." />
+            <input type="time" id="schedule-time" aria-label="Schedule time" class="form-input" value="08:00" />
             <div class="day-pills">
                 <button class="day-pill active" data-day="mon">M</button>
                 <button class="day-pill active" data-day="tue">T</button>
@@ -258,7 +258,7 @@
 </div>
 
 <!-- ═══ HUD: Places Panel (left, below location) ═══ -->
-<div id="panel-places" class="hud-panel hud-panel-left hud-panel-below">
+<div id="panel-places" role="region" aria-label="Places" class="hud-panel hud-panel-left hud-panel-below">
     <div class="hud-panel-header" data-panel="panel-places">
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg>
         <span>PLACES</span>
@@ -284,7 +284,7 @@
 </div>
 
 <!-- ═══ HUD: Movement Panel (right) ═══ -->
-<div id="panel-movement" class="hud-panel hud-panel-right">
+<div id="panel-movement" role="region" aria-label="Movement" class="hud-panel hud-panel-right">
     <div class="hud-panel-header" data-panel="panel-movement">
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg>
         <span>MOVEMENT</span>
@@ -375,7 +375,7 @@
             <button id="btn-route-save-open" class="btn btn-ghost btn-xs" disabled>Save route</button>
             <div id="route-save-form" class="inline-form hidden">
                 <div class="inline-form-title">Save route</div>
-                <input type="text" id="route-save-name" class="form-input" placeholder="Route name..." />
+                <input type="text" id="route-save-name" aria-label="Route name" class="form-input" placeholder="Route name..." />
                 <div class="btn-group">
                     <button id="btn-route-save-cancel" class="btn btn-ghost">Cancel</button>
                     <button id="btn-route-save-confirm" class="btn btn-blue">Save</button>
@@ -412,7 +412,7 @@
         <div id="profile-form" class="inline-form hidden">
             <div class="section-divider"></div>
             <div class="inline-form-title">SAVE PROFILE</div>
-            <input type="text" id="profile-name" class="form-input" placeholder="Profile name..." />
+            <input type="text" id="profile-name" aria-label="Profile name" class="form-input" placeholder="Profile name..." />
             <div class="btn-group">
                 <button id="btn-profile-cancel" class="btn btn-ghost">Cancel</button>
                 <button id="btn-profile-confirm" class="btn btn-blue">Save</button>
@@ -456,7 +456,7 @@
 </div>
 
 <!-- ═══ Keyboard Shortcuts Overlay ═══ -->
-<div id="shortcuts-overlay" class="hidden">
+<div id="shortcuts-overlay" class="hidden" role="dialog" aria-modal="true" aria-label="Keyboard shortcuts">
     <div class="shortcuts-card">
         <div class="shortcuts-header">
             <span>KEYBOARD SHORTCUTS</span>
@@ -475,7 +475,7 @@
 </div>
 
 <!-- ═══ Anti-Detection Tips Overlay ═══ -->
-<div id="tips-overlay" class="hidden">
+<div id="tips-overlay" class="hidden" role="dialog" aria-modal="true" aria-label="Location simulation guide">
     <div class="tips-card">
         <div class="tips-header">
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" stroke-width="2"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
@@ -519,7 +519,7 @@
 </div>
 
 <!-- ═══ Route builder help ═══ -->
-<div id="build-help" class="hidden">
+<div id="build-help" class="hidden" role="dialog" aria-modal="true" aria-label="Ways to build a route">
     <div class="help-card">
         <div class="help-header"><span>Ways to build a route</span>
             <button id="btn-build-help-close" class="hud-panel-close" aria-label="Close">&times;</button></div>
@@ -540,7 +540,7 @@
 <div id="map" role="application" aria-label="Map. Click to set a location."></div>
 
 <!-- ═══ Map controls ═══ -->
-<div id="map-controls">
+<div id="map-controls" role="group" aria-label="Map controls">
     <button id="btn-my-location" class="map-btn" title="Back to my approximate location" aria-label="Back to my approximate location">
         <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="4"/><circle cx="12" cy="12" r="9"/><line x1="12" y1="1" x2="12" y2="4"/><line x1="12" y1="20" x2="12" y2="23"/><line x1="1" y1="12" x2="4" y2="12"/><line x1="20" y1="12" x2="23" y2="12"/></svg>
     </button>

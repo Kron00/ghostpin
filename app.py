@@ -111,6 +111,14 @@ def _check_ready():
     return None
 
 
+@app.before_request
+def _validate_json_object():
+    if request.is_json and request.method in ("POST", "PUT", "PATCH"):
+        data = request.get_json(silent=True)
+        if not isinstance(data, dict):
+            return jsonify({"error": "Request body must be a JSON object"}), 400
+
+
 # ── Pages ──────────────────────────────────────────────────────
 
 @app.route("/")
@@ -2210,11 +2218,18 @@ def api_route_start():
     randomize = data.get("randomize_speed", False)
     coordinates = data.get("coordinates")
     try:
-        speed = float(speed)
-    except (TypeError, ValueError):
-        speed = 5
-
-    try:
+        speed = LocationService.validate_speed(speed)
+        waypoints = LocationService.validate_waypoints(waypoints)
+        if coordinates is not None:
+            if not isinstance(coordinates, list) or not 2 <= len(coordinates) <= 20000:
+                raise ValueError("Calculated route geometry is invalid")
+            normalized = []
+            for point in coordinates:
+                if not isinstance(point, (list, tuple)) or len(point) < 2:
+                    raise ValueError("Calculated route geometry is invalid")
+                lat, lon = LocationService.validate_coordinates(point[1], point[0])
+                normalized.append([lon, lat])
+            coordinates = normalized
         client_holds = _validate_route_holds(data.get("holds"), coordinates)
         waypoint_holds = _waypoint_holds(data.get("stop_indices"), coordinates)
         if len(client_holds) + len(waypoint_holds) > _MAX_ROUTE_HOLDS:
@@ -2320,9 +2335,6 @@ def api_route_status():
 
 @app.route("/api/route/circular", methods=["POST"])
 def api_route_circular():
-    err = _check_ready()
-    if err:
-        return err
     data = request.json or {}
     try:
         lat = float(data["lat"])
@@ -2332,7 +2344,10 @@ def api_route_circular():
     except (KeyError, TypeError, ValueError):
         return jsonify({"error": "lat, lon, and radius are required"}), 400
 
-    waypoints = loc_svc.generate_circular_route(lat, lon, radius, points)
+    try:
+        waypoints = loc_svc.generate_circular_route(lat, lon, radius, points)
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
     return jsonify({"waypoints": waypoints, "count": len(waypoints)})
 
 
@@ -2379,12 +2394,9 @@ def api_wander_status():
 
 @app.route("/api/gpx/import", methods=["POST"])
 def api_gpx_import():
-    err = _check_ready()
-    if err:
-        return err
     # Accept either file upload or raw body
     if request.files and "file" in request.files:
-        content = request.files["file"].read().decode("utf-8")
+        content = request.files["file"].read()
     else:
         content = request.get_data(as_text=True)
     if not content:
@@ -2426,7 +2438,8 @@ def api_saved_add():
     if loc_svc is None:
         return jsonify({"error": "No iPhone connected. Plug it in, unlock it, and try again."}), 503
     data = request.json or {}
-    name = data.get("name", "").strip()
+    name = data.get("name", "")
+    name = name.strip() if isinstance(name, str) else ""
     if not name:
         return jsonify({"error": "Name is required"}), 400
     try:
@@ -2435,8 +2448,10 @@ def api_saved_add():
     except (KeyError, TypeError, ValueError):
         return jsonify({"error": "lat and lon are required"}), 400
     category = data.get("category", "default")
-    result = loc_svc.save_location(name, lat, lon, category)
-    return jsonify(result)
+    try:
+        return jsonify(loc_svc.save_location(name, lat, lon, category))
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
 
 
 @app.route("/api/saved/<path:name>", methods=["DELETE"])
@@ -2483,16 +2498,18 @@ def api_routes_save():
     if loc_svc is None:
         return jsonify({"error": "No iPhone connected. Plug it in, unlock it, and try again."}), 503
     data = request.json or {}
-    name = data.get("name", "").strip()
+    name = data.get("name", "")
+    name = name.strip() if isinstance(name, str) else ""
     if not name:
         return jsonify({"error": "Name is required"}), 400
     waypoints = data.get("waypoints", [])
-    if len(waypoints) < 2:
-        return jsonify({"error": "Need at least 2 waypoints"}), 400
     speed = data.get("speed", 5)
     mode = data.get("mode", "once")
     distance = data.get("distance_km", 0)
-    return jsonify(loc_svc.save_route(name, waypoints, speed, mode, distance))
+    try:
+        return jsonify(loc_svc.save_route(name, waypoints, speed, mode, distance))
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
 
 
 @app.route("/api/routes/<route_id>", methods=["DELETE"])
@@ -2516,10 +2533,14 @@ def api_profiles_save():
     if loc_svc is None:
         return jsonify({"error": "No iPhone connected. Plug it in, unlock it, and try again."}), 503
     data = request.json or {}
-    name = data.get("name", "").strip()
+    name = data.get("name", "")
+    name = name.strip() if isinstance(name, str) else ""
     if not name:
         return jsonify({"error": "Name is required"}), 400
-    return jsonify(loc_svc.save_profile(name, data))
+    try:
+        return jsonify(loc_svc.save_profile(name, data))
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
 
 
 @app.route("/api/profiles/<path:name>/load", methods=["POST"])
@@ -2554,7 +2575,8 @@ def api_schedules_create():
     if loc_svc is None:
         return jsonify({"error": "No iPhone connected. Plug it in, unlock it, and try again."}), 503
     data = request.json or {}
-    name = data.get("name", "").strip()
+    name = data.get("name", "")
+    name = name.strip() if isinstance(name, str) else ""
     if not name:
         return jsonify({"error": "Name is required"}), 400
     try:
@@ -2564,7 +2586,10 @@ def api_schedules_create():
         return jsonify({"error": "lat and lon are required"}), 400
     time_str = data.get("time", "")
     days = data.get("days", None)
-    return jsonify(loc_svc.save_schedule(name, lat, lon, time_str, days))
+    try:
+        return jsonify(loc_svc.save_schedule(name, lat, lon, time_str, days))
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
 
 
 @app.route("/api/schedules/<schedule_id>", methods=["DELETE"])
