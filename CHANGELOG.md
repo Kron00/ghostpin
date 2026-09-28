@@ -35,6 +35,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Prepare Roam roads while the previous route stops, while requiring a confirmed
+  stop before starting movement and keeping Stop available if cleanup fails.
+- Reuse road data for up to 24 hours across app launches, share simultaneous
+  lookups for the same area, and avoid rescanning unaffected road junctions.
 - Replace the app icon with a minimal ghost pin: a cream pin with two eyes on
   slate night, kept as editable `icon.svg`. The map marker and onboarding use
   the same pin.
