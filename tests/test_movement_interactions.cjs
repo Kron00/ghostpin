@@ -64,7 +64,12 @@ const tick=()=>new Promise(resolve=>setImmediate(resolve));
   assert.equal(parallelStarts,2);
   assert.equal(lookupSignal.aborted,true);
   assert.equal(elements.get('btn-roam-start').disabled,false);
+  run('updateRoamUI()');
+  assert.equal(elements.get('btn-roam-stop').disabled,false,'Failed prerequisite Stop must remain retryable');
   rejectLookup(new Error('Lookup aborted')); await tick();
+  context.fetch=async()=>ok({});
+  await run('stopRoaming()');
+  assert.equal(elements.get('btn-roam-stop').disabled,true,'Confirmed Stop clears retry state');
  }
  // A lookup failure can arrive first; the later stop rejection is handled.
  let rejectStop;
@@ -74,8 +79,24 @@ const tick=()=>new Promise(resolve=>setImmediate(resolve));
   if(url==='/api/route/start')parallelStarts++;
   return ok({});
  };
- await run('startRoaming()'); rejectStop(new Error('Stop failed')); await tick();
+ await run('startRoaming()');
+ assert.equal(elements.get('btn-roam-stop').disabled,true);
+ rejectStop(new Error('Stop failed')); await tick();
+ assert.equal(elements.get('btn-roam-stop').disabled,false,'Late Stop failure must also remain retryable');
  assert.equal(parallelStarts,2);
+ // Reset invalidates a pending Stop failure from an older start attempt.
+ await run('startRoaming()');
+ await run('clearLocation()');
+ rejectStop(new Error('Old Stop failed')); await tick();
+ assert.equal(elements.get('btn-roam-stop').disabled,true);
+ assert.equal(run('roamStopNeedsRetry'),false);
+ // A lookup failure with a successful Stop does not leave a retry button.
+ context.fetch=async url=>{
+  if(url==='/api/roam/route')throw new Error('Road lookup failed');
+  return ok({});
+ };
+ await run('startRoaming()');
+ assert.equal(elements.get('btn-roam-stop').disabled,true);
  // Cancel while roads are loading. A late response must never start a route.
  let resolveRoads; let starts=0;
  context.fetch=async(url)=>{
