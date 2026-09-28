@@ -68,6 +68,7 @@ jobs:
         run: |
           node --check static/js/app.js
           node tests/test_interactions.cjs
+          node tests/test_movement_interactions.cjs
 
   shellcheck:
     name: Shell scripts

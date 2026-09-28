@@ -5,7 +5,7 @@ import random
 import re
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 
 import requests as http_requests
 from flask import Flask, jsonify, request, render_template, send_from_directory
@@ -108,6 +108,9 @@ def _check_ready():
         return jsonify({"error": "Tunnel not connected. Ensure iPhone is plugged in and restart the app."}), 503
     if loc_svc is None or loc_svc.simulator is None or loc_svc.bridge is None:
         return jsonify({"error": "No device connected. Plug in your iPhone and restart."}), 503
+    info = getattr(device_mgr, "device_info", {})
+    if info.get("connected") is False:
+        return jsonify({"error": info.get("error") or "iPhone disconnected. Reconnect and try again."}), 503
     return None
 
 
@@ -478,7 +481,7 @@ def api_clear_location():
 def api_current_location():
     if loc_svc is None:
         return jsonify({"error": "No iPhone connected. Plug it in, unlock it, and try again."}), 503
-    loc = loc_svc.get_current()
+    loc = loc_svc.get_current(include_route=True)
     if loc is None:
         return jsonify({"error": "No location set"}), 404
     return jsonify(loc)
@@ -518,9 +521,9 @@ def api_joystick_move():
 
 @app.route("/api/joystick/stop", methods=["POST"])
 def api_joystick_stop():
-    err = _check_ready()
-    if err:
-        return err
+    # Stopping local writers must work even after the device channel closes.
+    if loc_svc is None:
+        return jsonify({"error": "Location service is unavailable"}), 503
     return jsonify(loc_svc.joystick_stop())
 
 
@@ -1133,6 +1136,8 @@ def _fetch_road_graph(lat, lon, radius_m):
         ");out geom;"
     )
     elements = _overpass_elements(query)
+    if elements is None:
+        raise http_requests.ConnectionError("Road lookup services are unavailable")
     if not elements:
         return None
 
@@ -1783,6 +1788,10 @@ def api_roam_route():
         return jsonify({"error": "A centre and radius are required"}), 400
     if not (-90 <= lat <= 90 and -180 <= lon <= 180):
         return jsonify({"error": "Centre is out of range"}), 400
+    if not math.isfinite(radius) or not 50 <= radius <= 50000:
+        return jsonify({"error": "Roam radius must be between 50 metres and 50 kilometres"}), 400
+    if not math.isfinite(target_km) or target_km <= 0:
+        return jsonify({"error": "Roam distance must be a positive number"}), 400
 
     from_lat = from_lon = None
     if "from_lat" in data or "from_lon" in data:
@@ -1831,11 +1840,14 @@ def api_roam_route():
     # fail this chunk so the active client retries; never substitute the old
     # scattered-waypoint tour, which is not a random walk.
     target = max(0.35, min(target_km, 60.0))
-    graph = _fetch_road_graph(lat, lon, radius)
-    if not graph:
+    try:
+        graph = _fetch_road_graph(lat, lon, radius)
+    except http_requests.RequestException:
         return jsonify({
-            "error": "Road graph is temporarily unavailable. Trying again shortly."
+            "error": "Road lookup is unavailable. Check your connection and try again."
         }), 503
+    if not graph:
+        return jsonify({"error": "No connected drivable roads in this area. Try a larger radius or another centre."}), 404
     walk_lat = from_lat if from_lat is not None else lat
     walk_lon = from_lon if from_lon is not None else lon
     route = _random_walk(graph, walk_lat, walk_lon, target, walk_state)
@@ -1896,29 +1908,68 @@ def _parse_maxspeed(value):
 # turn and take the first that answers.
 _OVERPASS_ENDPOINTS = (
     "https://overpass-api.de/api/interpreter",
+    "https://maps.mail.ru/osm/tools/overpass/api/interpreter",
     "https://overpass.kumi.systems/api/interpreter",
     "https://overpass.private.coffee/api/interpreter",
-    "https://maps.mail.ru/osm/tools/overpass/api/interpreter",
 )
+_overpass_last_good = None
+_OVERPASS_POOL = ThreadPoolExecutor(max_workers=4, thread_name_prefix="road-lookup")
+_OVERPASS_HEDGE_SECONDS = 3
+_OVERPASS_DEADLINE_SECONDS = 30
 
 
 def _overpass_elements(query):
-    """Return the elements for an Overpass query, trying each mirror in turn, or
-    None if every mirror fails."""
-    for url in _OVERPASS_ENDPOINTS:
+    """Try the last healthy mirror first; hedge a stalled lookup after 3 s.
+
+    At most two mirrors run per query, and a shared pool bounds total network
+    work. Never wait for a stalled losing request after another mirror succeeds.
+    """
+    global _overpass_last_good
+
+    def fetch(url):
         try:
             response = http_requests.post(
-                url,
-                data={"data": query},
+                url, data={"data": query},
                 headers={"User-Agent": "Ghostpin/2.0 (https://github.com/Kron00/ghostpin)"},
-                timeout=25,
+                timeout=(4, 25),
             )
             response.raise_for_status()
-            elements = response.json().get("elements", [])
-            if isinstance(elements, list):
-                return elements
+            payload = response.json()
+            if not isinstance(payload, dict) or payload.get("remark"):
+                return None  # HTTP 200 can still describe a timed-out query.
+            elements = payload.get("elements")
+            return elements if isinstance(elements, list) else None
         except (http_requests.RequestException, ValueError):
-            continue
+            return None
+
+    endpoints = iter(sorted(_OVERPASS_ENDPOINTS, key=lambda url: url != _overpass_last_good))
+    pending = {}
+
+    def launch():
+        url = next(endpoints, None)
+        if url is not None:
+            pending[_OVERPASS_POOL.submit(fetch, url)] = url
+
+    deadline = time.monotonic() + _OVERPASS_DEADLINE_SECONDS
+    launch()
+    try:
+        while pending:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            done, _ = wait(pending, timeout=min(_OVERPASS_HEDGE_SECONDS, remaining),
+                           return_when=FIRST_COMPLETED)
+            for future in done:
+                url = pending.pop(future)
+                elements = future.result()
+                if elements is not None:
+                    _overpass_last_good = url
+                    return elements
+            if len(pending) < 2:
+                launch()
+    finally:
+        for future in pending:
+            future.cancel()
     return None
 
 
@@ -1956,14 +2007,7 @@ def _fetch_speed_profile(coordinates, fallback_kmh):
             f'node[highway~"^(stop|give_way|traffic_signals)$"]({bbox});'
             ");out geom;"
         )
-        response = http_requests.post(
-            "https://overpass-api.de/api/interpreter",
-            data={"data": query},
-            headers={"User-Agent": "Ghostpin/2.0 (https://github.com/Kron00/ghostpin)"},
-            timeout=25,
-        )
-        response.raise_for_status()
-        elements = response.json().get("elements", [])
+        elements = _overpass_elements(query)
         if not isinstance(elements, list):
             return None
 
@@ -2211,6 +2255,8 @@ def api_route_start():
     err = _check_ready()
     if err:
         return err
+    # Stop/Reset can arrive while adaptive lookup or route planning is pending.
+    generation = loc_svc._route_generation
     data = request.json or {}
     waypoints = data.get("waypoints", [])
     speed = data.get("speed", 5)
@@ -2277,6 +2323,7 @@ def api_route_start():
             speeds=speeds,
             holds=holds,
             gps_noise=gps_noise,
+            expected_generation=generation,
         )
         result["adaptive"] = adaptive_used
         return jsonify(result)
@@ -2301,9 +2348,9 @@ def api_movement_speed():
 
 @app.route("/api/route/stop", methods=["POST"])
 def api_route_stop():
-    err = _check_ready()
-    if err:
-        return err
+    # Stopping local writers must work even after the device channel closes.
+    if loc_svc is None:
+        return jsonify({"error": "Location service is unavailable"}), 503
     return jsonify(loc_svc.stop_route())
 
 
@@ -2377,9 +2424,9 @@ def api_wander_start():
 
 @app.route("/api/wander/stop", methods=["POST"])
 def api_wander_stop():
-    err = _check_ready()
-    if err:
-        return err
+    # Stopping local writers must work even after the device channel closes.
+    if loc_svc is None:
+        return jsonify({"error": "Location service is unavailable"}), 503
     return jsonify(loc_svc.stop_wander())
 
 

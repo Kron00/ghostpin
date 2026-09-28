@@ -53,6 +53,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Pace routes, joystick, and Wander on absolute deadlines, with up to 20 fixes
+  per second and recovery after transient transport delays. Drop delayed travel
+  time instead of creating catch-up jumps.
+- Preserve velocity through speed changes, brake into finer rounded turns, and
+  filter GPS drift so successive fixes do not wobble. Realistic mode respects
+  posted limits instead of adding a random speeding offset.
+- Draw Roam previews from the actual rounded path and accepted progress,
+  avoiding nearest-point jumps across repeated intersections.
+- Keep speed mode and route-builder tabs independent.
+- Add deterministic motion-quality tests for acceleration, braking, speed
+  changes, transport stalls, failed writes, cadence recovery, and drift.
+
 - Keep search results current, invalidate routes when stops change, restore
   saved speed/playback settings, and report failed actions without false success.
 - Stop joystick movement when the window loses focus or a pointer is released.

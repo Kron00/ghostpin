@@ -43,6 +43,21 @@ class ConnectionTests(unittest.TestCase):
                 response = client.post('/api/device/connect', json={})
             self.assertEqual(response.status_code, 409)
 
+    def test_auto_reconnect_retries_a_closed_wifi_channel(self):
+        manager = self.manager
+        manager._auto_reconnect = True
+        manager._reconnect_target = ('wifi-phone', True)
+        manager.device_info.update(connected=False, connecting=False)
+
+        def finish_iteration(*args):
+            manager._auto_reconnect = False
+
+        with patch.object(manager, 'disconnect'), patch.object(manager, 'connect',
+                return_value={'connection_type': 'WiFi'}) as connect, patch(
+                'device_manager.time.sleep', finish_iteration):
+            manager._reconnect_loop()
+        connect.assert_called_once_with(udid='wifi-phone', prefer_wifi=True, retries=3, delay=2)
+
     def test_switch_stops_all_writers_and_detaches_failed_session(self):
         manager = Mock()
         manager.device_info = {'connected': True}
@@ -106,6 +121,14 @@ class DeveloperReadinessTests(unittest.IsolatedAsyncioTestCase):
             provider.connect.assert_awaited_once()
             simulator.connect.assert_awaited_once()
             self.assertTrue(manager.device_info['ddi_mounted'])
+            manager.device_info['connected'] = True
+            simulator.service.on_closed('connection closed')
+            self.assertFalse(manager.device_info['connected'])
+            self.assertIn('Reconnect', manager.device_info['error'])
+            manager._generation += 1
+            manager.device_info['connected'] = True
+            simulator.service.on_closed('old session closing')
+            self.assertTrue(manager.device_info['connected'])
 
 
 class UpdateTests(unittest.TestCase):

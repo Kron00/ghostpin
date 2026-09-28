@@ -101,6 +101,74 @@ class MovementFlowTests(unittest.TestCase):
         self.assertEqual(self.client.post('/api/location/clear').status_code, 200)
         self.assertIsNone(self.service.current_location)
 
+    def test_reset_during_adaptive_lookup_cancels_late_start(self):
+        entered, release = threading.Event(), threading.Event()
+        responses = []
+
+        def delayed_profile(*args):
+            entered.set()
+            release.wait(timeout=3)
+            return ([20], [])
+
+        def start():
+            with app_module.app.test_client() as client:
+                responses.append(client.post('/api/route/start', json={
+                    'waypoints': [{'lat': 48.8584, 'lng': 2.2945}, {'lat': 48.8585, 'lng': 2.2945}],
+                    'coordinates': [[2.2945, 48.8584], [2.2945, 48.8585]],
+                    'speed': 5, 'adaptive': True,
+                }))
+
+        with patch.object(app_module, '_fetch_speed_profile', delayed_profile):
+            worker = threading.Thread(target=start)
+            worker.start()
+            self.assertTrue(entered.wait(timeout=1))
+            self.assertEqual(self.client.post('/api/location/clear').status_code, 200)
+            release.set()
+            worker.join(timeout=3)
+        self.assertFalse(worker.is_alive())
+        self.assertEqual(responses[0].status_code, 400)
+        self.assertIn('cancelled', responses[0].json['error'])
+        self.assertFalse(self.service._route_active)
+        self.assertIsNone(self.service.current_location)
+        self.assertEqual(self.simulator.writes, [])
+
+    def test_stop_during_osrm_lookup_cancels_late_start(self):
+        from unittest.mock import Mock
+        response = Mock()
+        response.json.return_value = {'code': 'Ok', 'routes': [{'geometry': {
+            'coordinates': [[2.2945, 48.8584], [2.2945, 48.8585]]}}]}
+
+        def delayed_lookup(*args, **kwargs):
+            self.service.stop_route()
+            return response
+
+        with patch.object(location_service.http_requests, 'get', delayed_lookup):
+            with self.assertRaisesRegex(ValueError, 'cancelled'):
+                self.service.start_route([{'lat': 48.8584, 'lng': 2.2945},
+                                          {'lat': 48.8585, 'lng': 2.2945}])
+        self.assertEqual(self.simulator.writes, [])
+        self.assertFalse(self.service._route_active)
+
+    def test_profile_placement_stops_route_and_holds_new_location(self):
+        self.start_route(length=0.0003)
+        self.wait_for(lambda: len(self.simulator.writes) >= 2)
+        self.service.set_location(48.86, 2.30)
+        self.assertFalse(self.service._route_active)
+        time.sleep(0.2)
+        self.assertEqual(self.service.current_location, {'lat': 48.86, 'lon': 2.30})
+        self.assertEqual(self.simulator.writes[-1], (48.86, 2.30))
+
+    def test_failed_reset_keeps_location_visible_and_can_be_retried(self):
+        from unittest.mock import AsyncMock
+        self.service.set_location(48.86, 2.30)
+        with patch.object(self.simulator, 'clear', AsyncMock(side_effect=RuntimeError('Connection lost'))):
+            response = self.client.post('/api/location/clear')
+        self.assertEqual(response.status_code, 500)
+        self.assertIn('Connection lost', response.json['error'])
+        self.assertIsNotNone(self.service.current_location)
+        self.assertEqual(self.client.post('/api/location/clear').status_code, 200)
+        self.assertIsNone(self.service.current_location)
+
     def test_reset_waits_for_an_inflight_joystick_write(self):
         entered, release = threading.Event(), threading.Event()
         self.service.current_location = {'lat': 48.8584, 'lon': 2.2945}

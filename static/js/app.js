@@ -8,6 +8,7 @@ let routePoints = [];
 let routeMarkers = [];
 let routePolling = null;
 let routeStarting = false;
+let movementEpoch = 0;
 let lastRouteStatus = null;
 let searchTimeout = null;
 let selectedSpeed = 15;
@@ -250,7 +251,7 @@ document.addEventListener("DOMContentLoaded", async () => {
     $("btn-route-calculate").addEventListener("click", calculateAddressRoute);
     $("btn-add-stop").addEventListener("click", addStop);
     $("btn-swap-stops").addEventListener("click", reverseStops);
-    document.querySelectorAll(".mode-tab").forEach(tab => {
+    document.querySelectorAll(".mode-tab[data-build]").forEach(tab => {
         tab.addEventListener("click", () => setBuildMode(tab.dataset.build));
     });
     renderStops();
@@ -692,6 +693,7 @@ function coordsInRange(lat, lon) {
 async function teleportTo(lat, lon) {
     if (!coordsInRange(lat, lon)) return toast("Latitude must be within ±90 and longitude within ±180", "error");
     storePreviousLocation();
+    cancelMovementUI();
     try { const r = await fetch("/api/location/set", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ lat, lon }) }); if (r.ok) { activeSpoofLocation = { lat, lon }; adoptDotAsRoamCentre(true); toast("Teleported to " + lat.toFixed(4) + ", " + lon.toFixed(4)); addToRecent(lat, lon); _stealthDismissed = false; checkStealth(); } else { const d = await r.json(); toast(d.error || "Failed", "error"); } } catch (e) { toast("Connection error", "error"); }
 }
 
@@ -703,10 +705,12 @@ async function setLocation() {
     // reject it after a round trip.
     if (!coordsInRange(lat, lon)) return toast("Latitude must be within ±90 and longitude within ±180", "error");
     storePreviousLocation();
+    cancelMovementUI();
     try { const r = await fetch("/api/location/set", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ lat, lon }) }); const d = await r.json(); if (r.ok) { activeSpoofLocation = { lat, lon }; adoptDotAsRoamCentre(true); toast("Location set: " + lat.toFixed(4) + ", " + lon.toFixed(4)); placeMarker(lat, lon); addToRecent(lat, lon); _stealthDismissed = false; checkStealth(); } else toast(d.error || "Failed", "error"); } catch (e) { toast("Connection error", "error"); }
 }
 
 async function clearLocation() {
+    cancelMovementUI();
     try { const r = await fetch("/api/location/clear", { method: "POST" }); if (r.ok) { activeSpoofLocation = null; toast("Reset to real GPS"); if (marker) { map.removeLayer(marker); marker = null; } $("lat-input").value = ""; $("lon-input").value = ""; renderReadout(null); if (startupLocation) goToUserLocation(); _stealthDismissed = false; await checkStealth(); } else { const d = await r.json().catch(() => ({})); toast(d.error || "Failed to reset", "error"); } } catch (e) { toast("Connection error", "error"); }
 }
 
@@ -714,6 +718,7 @@ async function clearLocation() {
 function storePreviousLocation() { if (activeSpoofLocation) { previousLocation = { ...activeSpoofLocation }; $("btn-undo").disabled = false; $("btn-undo").title = "Undo to " + previousLocation.lat.toFixed(4) + ", " + previousLocation.lon.toFixed(4); } }
 async function undoTeleport() {
     if (!previousLocation) return toast("No previous location", "error");
+    cancelMovementUI();
     try { const r = await fetch("/api/location/set", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(previousLocation) }); if (r.ok) { activeSpoofLocation = { ...previousLocation }; adoptDotAsRoamCentre(true); toast("Undone \u2014 back to " + previousLocation.lat.toFixed(4) + ", " + previousLocation.lon.toFixed(4)); placeMarker(previousLocation.lat, previousLocation.lon); map.flyTo([previousLocation.lat, previousLocation.lon], map.getZoom(), { duration: 0.8 }); previousLocation = null; $("btn-undo").disabled = true; $("btn-undo").title = "No previous location"; _stealthDismissed = false; checkStealth(); } } catch (e) { toast("Undo failed", "error"); }
 }
 
@@ -910,6 +915,7 @@ async function pollDevice() {
             if (!wasConnected) { wasConnected = true; toast("iPhone connected (" + ct + ")"); }
         } else {
             dot.classList.remove("connected", "degraded"); $("device-label").textContent = "No device";
+            if (d.error && $("connect-status")) $("connect-status").textContent = d.error;
             setReadinessValue("dev-developer", "Unavailable", "error");
             setReadinessValue("dev-ddi", "Unavailable", "error");
             setReadinessValue("dev-tunnel", "Unavailable", "error");
@@ -931,6 +937,7 @@ let connectionPending = false;
 async function connectDevice(wifi = false, udid = null) {
     if (connectionPending) return;
     connectionPending = true;
+    cancelMovementUI();
     const status = $("connect-status"), btnU = $("btn-connect"), btnW = $("btn-connect-wifi");
     const origU = btnU?.textContent, origW = btnW?.textContent;
     if (btnU) btnU.disabled = true;
@@ -1302,7 +1309,7 @@ function setDriveMode(realistic) {
     adaptiveSpeed = realistic;
     localStorage.setItem("adaptive_speed", realistic ? "1" : "0");
     updateAdaptiveUI();
-    toast(realistic ? "Realistic — posted limits, a few mph over" : "Flat speed");
+    toast(realistic ? "Realistic — road limits, natural turns and stops" : "Flat speed");
 }
 
 function updateAdaptiveUI() {
@@ -1344,6 +1351,8 @@ let roamCircle = null;
 let roamUnitMiles = localStorage.getItem("roam_unit") === "mi" ? true
                   : (localStorage.getItem("roam_unit") === "km" ? false : null);
 let roamActive = false;
+let roamStarting = false;
+let roamFetchController = null;
 let roamRetryTimer = null;
 let roamWalkState = null;
 let roamChunkSpeeds = null;
@@ -1371,10 +1380,10 @@ function roamChunkRequest(fromLocation, useWalkState) {
     return request;
 }
 
-async function fetchRoamChunkData(fromLocation, useWalkState) {
+async function fetchRoamChunkData(fromLocation, useWalkState, signal) {
     const response = await fetch("/api/roam/route", {
         method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(roamChunkRequest(fromLocation, useWalkState))
+        body: JSON.stringify(roamChunkRequest(fromLocation, useWalkState)), signal
     });
     const data = await response.json();
     return response.ok ? { data } : { error: data.error || "Could not find roads there" };
@@ -1387,10 +1396,11 @@ function prefetchNextRoamChunk() {
     const end = roamChunkCoords[roamChunkCoords.length - 1];
     if (!end) return;
     roamPrefetching = true;
+    const epoch = movementEpoch;
     fetchRoamChunkData({ lat: end[1], lon: end[0] }, true)
-        .then(result => { if (roamActive && result && result.data) roamPrefetch = result.data; })
+        .then(result => { if (epoch === movementEpoch && roamActive && result && result.data) roamPrefetch = result.data; })
         .catch(() => {})
-        .finally(() => { roamPrefetching = false; });
+        .finally(() => { if (epoch === movementEpoch) roamPrefetching = false; });
 }
 
 const METRES_PER_MILE = 1609.344;
@@ -1399,7 +1409,15 @@ const METRES_PER_MILE = 1609.344;
 // next chunk — a network blip or a temporarily unavailable graph — must not
 // end it: keep roaming alive and retry shortly. Only a failure on the very first
 // tour (the user is watching and can adjust) or an explicit Stop ends it.
+function setRoamStatus(message, error = false) {
+    const status = $("roam-status");
+    if (!status) return;
+    status.textContent = message;
+    status.className = "route-address-status" + (message ? (error ? " error" : " loading") : " hidden");
+}
+
 function failRoam(silent, message) {
+    setRoamStatus(message + (silent && roamActive ? " Retrying…" : ""), true);
     if (silent && roamActive) {
         updateRoamUI();
         clearTimeout(roamRetryTimer);
@@ -1407,6 +1425,7 @@ function failRoam(silent, message) {
         return;
     }
     roamActive = false;
+    roamStarting = false;
     updateRoamUI();
     toast(message, "error");
 }
@@ -1460,19 +1479,26 @@ function adoptDotAsRoamCentre(force = false) {
 
 function updateRoamUI() {
     const ready = !!roamCentre && !!roamRadiusMetres();
-    $("btn-roam-start").disabled = !ready || roamActive;
-    $("btn-roam-stop").disabled = !roamActive;
+    $("btn-roam-start").disabled = !ready || roamActive || roamStarting;
+    $("btn-roam-start").textContent = roamStarting ? "Finding roads…" : "Start roaming";
+    $("btn-roam-stop").disabled = !roamActive && !roamStarting;
+    $("btn-roam-stop").textContent = roamStarting ? "Cancel" : "Stop";
     $("roam-unit-toggle").textContent = roamUnitMiles !== false ? "mi" : "km";
 }
 
 async function startRoaming(silent = false, fromLocation = null, prefetchedData = null) {
+    if (roamStarting || (silent && !roamActive)) return;
     // A placed dot stands in for a centre that was never explicitly picked.
     if (!silent) adoptDotAsRoamCentre();
     const radius = roamRadiusMetres();
     if (!roamCentre || !radius) return toast("Pick a centre and a radius first", "error");
     const speed = routeSpeedKmh();
-    const button = $("btn-roam-start");
-    button.disabled = true;
+    if (!silent) cancelMovementUI();
+    const epoch = movementEpoch;
+    roamStarting = true;
+    roamFetchController = new AbortController();
+    setRoamStatus("Finding drivable roads. This can take up to 30 seconds; you can cancel.");
+    updateRoamUI();
     if (!silent) {
         roamWalkState = null;
         roamPrefetch = null;
@@ -1480,13 +1506,15 @@ async function startRoaming(silent = false, fromLocation = null, prefetchedData 
         // — a stale session, or one this window lost track of — so the start is
         // never locked out by "A route is already running".
         try { await fetch("/api/route/stop", { method: "POST" }); } catch (e) { /* ignore */ }
+        if (epoch !== movementEpoch) return;
         toast("Finding roads to roam…");
     }
 
     try {
         let data = prefetchedData;
         if (!data) {
-            const result = await fetchRoamChunkData(fromLocation, silent);
+            const result = await fetchRoamChunkData(fromLocation, silent, roamFetchController.signal);
+            if (epoch !== movementEpoch) return;
             if (result.error) { return failRoam(silent, result.error); }
             data = result.data;
         }
@@ -1508,12 +1536,15 @@ async function startRoaming(silent = false, fromLocation = null, prefetchedData 
         });
         let start = await postStart();
         let started = await start.json();
+        if (epoch !== movementEpoch) return;
         // A race at a seam can leave the previous chunk's route briefly active;
         // stop it and try once more rather than giving up.
         if (!start.ok && /already running/i.test(started.error || "")) {
             try { await fetch("/api/route/stop", { method: "POST" }); } catch (e) { /* ignore */ }
+            if (epoch !== movementEpoch) return;
             start = await postStart();
             started = await start.json();
+            if (epoch !== movementEpoch) return;
         }
         if (!start.ok) { return failRoam(silent, started.error || "Could not start roaming"); }
 
@@ -1521,6 +1552,12 @@ async function startRoaming(silent = false, fromLocation = null, prefetchedData 
         roamChunkSpeeds = Array.isArray(data.speeds) ? data.speeds : null;
         roamChunkHolds = Array.isArray(data.holds) ? data.holds : [];
         roamActive = true;
+        setRoamStatus("");
+        roamStarting = false;
+        routeDistanceKm = data.distance_km || 0;
+        $("btn-route-stop").disabled = false;
+        $("btn-route-pause").classList.remove("hidden");
+        $("btn-route-resume").classList.add("hidden");
         updateRoamUI();
         drawRoamPath(data.coordinates);
         clearInterval(routePolling);
@@ -1536,7 +1573,13 @@ async function startRoaming(silent = false, fromLocation = null, prefetchedData 
         startMovementTracking();
         if (!silent) toast("Roaming " + data.distance_km + " km of roads");
     } catch (e) {
-        failRoam(silent, "Could not start roaming");
+        if (epoch === movementEpoch) failRoam(silent, "Could not start roaming");
+    } finally {
+        if (epoch === movementEpoch) {
+            roamStarting = false;
+            roamFetchController = null;
+            updateRoamUI();
+        }
     }
 }
 
@@ -1551,32 +1594,15 @@ function drawRoamPath(coordinates) {
     roamChunkCoords = coordinates;
     roamChunkIdx = 0;
     if (roamPathLine) { map.removeLayer(roamPathLine); roamPathLine = null; }
-    if (coordinates?.length) updateRoamLookahead(coordinates[0][1], coordinates[0][0]);
+    // The next position poll supplies the preview from the accepted device fix.
 }
 
 function remainingRoamChunk(fromLocation) {
     const coords = roamChunkCoords;
     if (!coords?.length || !fromLocation) return null;
-    const scale = Math.cos(fromLocation.lat * Math.PI / 180) * 111320;
-    const distance = (point) => Math.hypot(
-        (point[1] - fromLocation.lat) * 111320,
-        (point[0] - fromLocation.lon) * scale
-    );
-    let best = Math.max(0, Math.min(roamChunkIdx, coords.length - 1));
-    let bestDistance = distance(coords[best]);
-    // The last position poll normally leaves roamChunkIdx exact. Search around
-    // it for a write that landed between geometry points, but never scan far
-    // enough backward to match an earlier lap of a small loop.
-    const start = Math.max(0, best - 10);
-    const end = Math.min(coords.length, best + 250);
-    for (let index = start; index < end; index++) {
-        const candidateDistance = distance(coords[index]);
-        if (candidateDistance < bestDistance) {
-            best = index;
-            bestDistance = candidateDistance;
-        }
-    }
-
+    // This index comes from the motion engine, so repeated intersections never
+    // snap recovery onto a later visit to the same street.
+    const best = Math.max(0, Math.min(roamChunkIdx, coords.length - 1));
     const coordinates = [[fromLocation.lon, fromLocation.lat], ...coords.slice(best + 1)];
     if (coordinates.length < 2) return null;
     const speeds = Array.isArray(roamChunkSpeeds)
@@ -1591,6 +1617,7 @@ function remainingRoamChunk(fromLocation) {
 async function recoverRoamingAfterDeviceError(message) {
     if (!roamActive || roamRecoveryInProgress) return;
     roamRecoveryInProgress = true;
+    const epoch = movementEpoch;
     clearTimeout(roamRetryTimer);
     updateRoamUI();
     toast(message + " Reconnecting…", "error");
@@ -1600,7 +1627,7 @@ async function recoverRoamingAfterDeviceError(message) {
             body: JSON.stringify({ wifi: currentDeviceInfo?.connection_type === "WiFi" })
         });
         if (!reconnect.ok) throw new Error("Device reconnect failed");
-        if (!roamActive) return;
+        if (!roamActive || epoch !== movementEpoch) return;
 
         const fromLocation = activeSpoofLocation
             && Number.isFinite(activeSpoofLocation.lat)
@@ -1633,10 +1660,7 @@ async function recoverRoamingAfterDeviceError(message) {
         });
         const started = await startedResponse.json().catch(() => ({}));
         if (!startedResponse.ok) throw new Error(started.error || "Could not resume roaming");
-        if (!roamActive) {
-            await fetch("/api/route/stop", { method: "POST" });
-            return;
-        }
+        if (!roamActive || epoch !== movementEpoch) return;
 
         roamChunkSpeeds = remaining.speeds;
         roamChunkHolds = remaining.holds;
@@ -1647,48 +1671,35 @@ async function recoverRoamingAfterDeviceError(message) {
         pollDevice();
         toast("iPhone reconnected — roaming resumed");
     } catch (e) {
-        if (roamActive) {
+        if (roamActive && epoch === movementEpoch) {
             roamRetryTimer = setTimeout(
                 () => recoverRoamingAfterDeviceError(message), 3000
             );
         }
     } finally {
-        roamRecoveryInProgress = false;
+        if (epoch === movementEpoch) roamRecoveryInProgress = false;
     }
 }
 
-function updateRoamLookahead(lat, lon) {
-    const coords = roamChunkCoords;
-    if (!coords || !coords.length) return;
-    const scale = Math.cos(lat * Math.PI / 180) * 111320;
-    const dist = (aLat, aLon, bLat, bLon) =>
-        Math.hypot((aLat - bLat) * 111320, (aLon - bLon) * scale);
-    // The dot only moves forward, so search a window ahead of the last match.
-    let best = roamChunkIdx, bestD = Infinity;
-    const end = Math.min(coords.length, roamChunkIdx + 250);
-    for (let i = roamChunkIdx; i < end; i++) {
-        const d = dist(lat, lon, coords[i][1], coords[i][0]);
-        if (d < bestD) { bestD = d; best = i; }
+function updateRoamLookahead(lat, lon, preview, coordinateIndex) {
+    if (Number.isInteger(coordinateIndex) && coordinateIndex >= 0) {
+        roamChunkIdx = coordinateIndex;
     }
-    roamChunkIdx = best;
-    const tail = [[lat, lon]];
-    let acc = 0;
-    let prevLat = coords[best][1], prevLon = coords[best][0];
-    for (let i = best; i < coords.length && acc < 400; i++) {
-        const ptLat = coords[i][1], ptLon = coords[i][0];
-        acc += dist(prevLat, prevLon, ptLat, ptLon);
-        tail.push([ptLat, ptLon]);
-        prevLat = ptLat; prevLon = ptLon;
-    }
+    if (!Array.isArray(preview) || preview.length < 2) return;
+    // The backend clips the next 400 m of its rounded driven path at the exact
+    // accepted fix. Never choose a nearest vertex from a later lap of the route.
+    const tail = [[lat, lon], ...preview.slice(1).map(point => [point[1], point[0]])];
     if (roamPathLine) roamPathLine.setLatLngs(tail);
     else roamPathLine = L.polyline(tail,
-        { color: MAP_INK.path, weight: 3, opacity: 0.7, dashArray: "6 7" }).addTo(map);
+        { color: MAP_INK.path, weight: 3, opacity: 0.85,
+          lineCap: "round", lineJoin: "round", smoothFactor: 0 }).addTo(map);
 }
 
 // When one stretch of road runs out, quietly lay out another so roaming keeps
 // going without repeating the same loop.
 async function continueRoaming() {
-    if (!roamActive) return;
+    if (!roamActive || roamStarting) return;
+    const epoch = movementEpoch;
     // The next chunk was prefetched from this chunk's end while it was still
     // driving, so start it straight away — no stop-and-wait at the seam.
     if (roamPrefetch) {
@@ -1710,21 +1721,19 @@ async function continueRoaming() {
             }
         }
     } catch (e) { /* the server will start from the scattered point */ }
-    await startRoaming(true, fromLocation);
+    if (epoch === movementEpoch && roamActive) await startRoaming(true, fromLocation);
 }
 
-async function stopRoaming() {
-    const button = $("btn-roam-stop");
-    if (button.disabled) return;
-    button.disabled = true;
-    try {
-        await requestMutation("/api/route/stop");
-        await requestMutation("/api/wander/stop");
-    } catch (error) {
-        button.disabled = false;
-        return toast(error.message || "Could not stop roaming. Try again.", "error");
-    }
+// Invalidate callbacks as soon as a newer command is issued. Network replies
+// from the old session must never restart movement or repaint cleared state.
+function cancelMovementUI() {
+    setRoamStatus("");
+    movementEpoch++;
     roamActive = false;
+    roamStarting = false;
+    routeStarting = false;
+    roamFetchController?.abort();
+    roamFetchController = null;
     clearTimeout(roamRetryTimer);
     if (roamPathLine) { map.removeLayer(roamPathLine); roamPathLine = null; }
     roamChunkCoords = null;
@@ -1734,9 +1743,25 @@ async function stopRoaming() {
     roamPrefetch = null;
     roamPrefetching = false;
     roamRecoveryInProgress = false;
+    joystickDirection = null;
+    _activeKeys.clear();
+    document.querySelectorAll(".joy-btn").forEach(b => b.classList.remove("active"));
+    endRoute();
     updateRoamUI();
-    stopMovementTracking();
-    toast("Roaming stopped");
+}
+
+async function stopRoaming() {
+    if ($("btn-roam-stop").disabled) return;
+    cancelMovementUI();
+    try {
+        await requestMutation("/api/route/stop");
+        await requestMutation("/api/wander/stop");
+        toast("Roaming stopped");
+    } catch (error) {
+        // Keep Stop retryable without restarting the automatic continuation.
+        $("btn-roam-stop").disabled = false;
+        toast(error.message || "Could not stop roaming. Try again.", "error");
+    }
 }
 
 // ── Explicit placement menu ──────────────────────────────────
@@ -1906,7 +1931,7 @@ function reverseStops() { routeStops.reverse(); invalidateCalculatedRoute(); ren
 
 function setBuildMode(mode) {
     if (mode !== "map" && mapPickTarget === "append") setMapPick(null);
-    document.querySelectorAll(".mode-tab").forEach(tab => {
+    document.querySelectorAll(".mode-tab[data-build]").forEach(tab => {
         const on = tab.dataset.build === mode;
         tab.classList.toggle("active", on);
         tab.setAttribute("aria-selected", on ? "true" : "false");
@@ -2011,12 +2036,15 @@ async function calculateAddressRoute() {
 
 async function startRoute() {
     if (routePoints.length < 2 || $("btn-route-start").disabled) return;
+    cancelMovementUI();
+    const epoch = movementEpoch;
     routeStarting = true;
+    $("btn-route-stop").disabled = false;
     $("btn-route-start").disabled = true;
     const speed = routeSpeedKmh(); const mode = $("route-mode").value; const randomize = $("speed-randomize").checked;
     const routeRequest = { waypoints: routePoints, speed, mode, randomize_speed: randomize, coordinates: calculatedRouteCoordinates, provider: calculatedRouteProvider, adaptive: adaptiveSpeed };
     if (calculatedRouteHolds !== null) routeRequest.holds = calculatedRouteHolds;
-    try { const r = await fetch("/api/route/start", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(routeRequest) }); const d = await r.json(); if (!r.ok) return toast(d.error || "Route failed", "error");
+    try { const r = await fetch("/api/route/start", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(routeRequest) }); const d = await r.json(); if (epoch !== movementEpoch) return; if (!r.ok) return toast(d.error || "Route failed", "error");
     routeDistanceKm = d.distance_km || 0;
     if (d.coordinates) {
         if (routeLine) { map.removeLayer(routeLine); routeLine = null; }
@@ -2033,15 +2061,18 @@ async function startRoute() {
     $("btn-route-start").disabled = true; $("btn-route-stop").disabled = false; $("btn-route-pause").classList.remove("hidden"); $("btn-route-resume").classList.add("hidden"); $("route-progress").classList.remove("hidden");
     toast("Route started: " + formatRouteDistance(d.distance_km) + " (" + mode + ") · following"); routePolling = setInterval(pollRoute, 1000); await pollPosition(); startMovementTracking();
     } catch (e) { toast("Route error", "error"); }
-    finally { routeStarting = false; if (!routePolling) $("btn-route-start").disabled = routePoints.length < 2; }
+    finally { if (epoch === movementEpoch) { routeStarting = false; if (!routePolling) { $("btn-route-start").disabled = routePoints.length < 2; $("btn-route-stop").disabled = true; } } }
 }
 
 async function routeAction(action, message) {
     const button = $("btn-route-" + action);
     if (button.disabled) return;
     button.disabled = true;
+    if (action === "stop") cancelMovementUI();
+    let succeeded = false;
     try {
         await requestMutation("/api/route/" + action);
+        succeeded = true;
         if (action === "stop") { roamActive = false; endRoute(); }
         else {
             $("btn-route-pause").classList.toggle("hidden", action === "pause");
@@ -2049,7 +2080,7 @@ async function routeAction(action, message) {
         }
         toast(message);
     } catch (error) { toast(error.message, "error"); }
-    finally { button.disabled = action === "stop" && !routePolling; }
+    finally { button.disabled = action === "stop" && succeeded; }
 }
 async function stopRoute() { return routeAction("stop", "Route stopped"); }
 async function pauseRoute() { return routeAction("pause", "Route paused"); }
@@ -2140,11 +2171,13 @@ function renderRouteSpeedStatus(data, targetOverride = null, fresh = false) {
 }
 
 async function pollRoute() {
-    try { const r = await fetch("/api/route/status"); if (!r.ok) {
+    const epoch = movementEpoch;
+    try { const r = await fetch("/api/route/status"); if (epoch !== movementEpoch) return; if (!r.ok) {
         endRoute();
         if (roamActive) recoverRoamingAfterDeviceError("Route status unavailable.");
         return;
     } const d = await r.json();
+    if (epoch !== movementEpoch) return;
     lastRouteStatus = d;
     const progressValue = finiteNumber(d.progress_pct);
     const progress = progressValue == null ? 0 : Math.max(0, Math.min(100, progressValue));
@@ -2193,13 +2226,14 @@ async function pollRoute() {
     } catch (e) {}
 }
 
-function endRoute() { clearInterval(routePolling); routePolling = null; lastRouteStatus = null; narrationSpeeds = []; $("btn-route-start").disabled = false; $("btn-route-stop").disabled = true; $("btn-route-pause").classList.add("hidden"); $("btn-route-resume").classList.add("hidden"); $("route-progress").classList.add("hidden"); if ($("status-route")) $("status-route").classList.add("hidden"); if (routeTraveledLine) { map.removeLayer(routeTraveledLine); routeTraveledLine = null; } stopMovementTracking(); updateStatusBar(); }
+function endRoute() { clearInterval(routePolling); routePolling = null; lastRouteStatus = null; narrationSpeeds = []; $("btn-route-start").disabled = routePoints.length < 2; $("btn-route-stop").disabled = true; $("btn-route-pause").classList.add("hidden"); $("btn-route-resume").classList.add("hidden"); $("route-progress").classList.add("hidden"); if ($("status-route")) $("status-route").classList.add("hidden"); if (routeTraveledLine) { map.removeLayer(routeTraveledLine); routeTraveledLine = null; } stopMovementTracking(); updateStatusBar(); }
 
 // ── Live tracking ───────────────────────────────────────────
 function startMovementTracking() { if (movementPolling) return; movementPolling = setInterval(pollPosition, 500); }
 function stopMovementTracking() { if (movementPolling) { clearInterval(movementPolling); movementPolling = null; } trailPoints = []; }
 async function pollPosition() {
-    if (!deviceReady()) return; try { const r = await fetch("/api/location/current"); if (!r.ok) return; const loc = await r.json(); activeSpoofLocation = { lat: loc.lat, lon: loc.lon }; placeMarker(loc.lat, loc.lon); if (roamActive) updateRoamLookahead(loc.lat, loc.lon); if (followMode) { map.stop(); map.panTo([loc.lat, loc.lon], { animate: true, duration: 0.3, noMoveStart: true }); } } catch (e) {} }
+    const epoch = movementEpoch;
+    if (!deviceReady()) return; try { const r = await fetch("/api/location/current"); if (!r.ok) return; const loc = await r.json(); if (epoch !== movementEpoch) return; activeSpoofLocation = { lat: loc.lat, lon: loc.lon }; placeMarker(loc.lat, loc.lon); if (roamActive) updateRoamLookahead(loc.lat, loc.lon, loc.route_preview, loc.route_coordinate_index); if (followMode) { map.stop(); map.panTo([loc.lat, loc.lon], { animate: true, duration: 0.3, noMoveStart: true }); } } catch (e) {} }
 
 // ── GPX ─────────────────────────────────────────────────────
 // ── Joystick ────────────────────────────────────────────────
@@ -2229,14 +2263,16 @@ function onKeyUp(e) {
 function _combineDirections() { const has = d => _activeKeys.has(d); if (has("n") && has("e")) return "ne"; if (has("n") && has("w")) return "nw"; if (has("s") && has("e")) return "se"; if (has("s") && has("w")) return "sw"; if (has("n")) return "n"; if (has("s")) return "s"; if (has("e")) return "e"; if (has("w")) return "w"; return null; }
 
 function deviceReady() {
-    const label = $("device-label");
-    return !!(label && !/connect|no device|scanning/i.test(label.textContent || ""));
+    return currentDeviceInfo?.connected === true && currentDeviceInfo.developer_mode !== false
+        && currentDeviceInfo.ddi_mounted !== false;
 }
 
 function joystickMove(direction) {
     if (joystickDirection === direction) return;
     // Silently doing nothing reads as a broken button.
     if (!deviceReady()) return toast("No iPhone connected", "error");
+    if (roamActive || roamStarting || routePolling || routeStarting) cancelMovementUI();
+    const epoch = movementEpoch;
     joystickDirection = direction;
     const speed = readSpeedKmh() || selectedSpeed;
     document.querySelectorAll(".joy-btn").forEach(b => b.classList.remove("active"));
@@ -2244,6 +2280,7 @@ function joystickMove(direction) {
     if (btn) btn.classList.add("active");
     startMovementTracking();
     joystickCommand = joystickCommand.catch(() => {}).then(async () => {
+        if (epoch !== movementEpoch) return;
         const r = await fetch("/api/joystick/move", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ direction, speed }) });
         if (!r.ok) throw new Error("Joystick move failed");
     }).catch(error => {
@@ -2361,7 +2398,7 @@ function dismissStealthBanner() { $("stealth-banner").classList.add("hidden"); _
 async function loadProfiles() {
     try { const r = await fetch("/api/profiles"); const profiles = await r.json(); const c = $("profile-list"); c.textContent = "";
     if (!profiles.length) { const e = document.createElement("div"); e.className = "empty-state"; e.textContent = "No profiles"; c.appendChild(e); return; }
-    profiles.forEach(p => { const item = document.createElement("div"); item.className = "saved-item"; makeItemAccessible(item); const n = document.createElement("span"); n.className = "saved-name"; n.textContent = p.name; const co = document.createElement("span"); co.className = "saved-coords"; co.textContent = (p.lat != null ? p.lat.toFixed(2) : "--") + ", " + (p.lon != null ? p.lon.toFixed(2) : "--"); const del = document.createElement("button"); del.className = "saved-del"; del.title = "Delete"; del.textContent = "\u00D7"; del.addEventListener("click", async e => { e.stopPropagation(); await deleteSavedItem(del, "/api/profiles/" + encodeURIComponent(p.name), loadProfiles, 'Deleted "' + p.name + '"'); }); item.appendChild(n); item.appendChild(co); item.appendChild(del); item.addEventListener("click", async e => { if (e.target.classList.contains("saved-del")) return; try { const r2 = await fetch("/api/profiles/" + encodeURIComponent(p.name) + "/load", { method: "POST" }); const d = await r2.json(); if (r2.ok) { toast('Profile "' + p.name + '" loaded'); if (Number.isFinite(d.profile?.speed)) setSelectedSpeed(d.profile.speed); if (d.profile?.route_mode) $("route-mode").value = d.profile.route_mode; if (coordsInRange(d.profile?.lat, d.profile?.lon)) { activeSpoofLocation = { lat: d.profile.lat, lon: d.profile.lon }; placeMarker(d.profile.lat, d.profile.lon); adoptDotAsRoamCentre(true); map.flyTo([d.profile.lat, d.profile.lon], 15); } } else toast(d.error || "Failed", "error"); } catch (e2) { toast("Error", "error"); } }); c.appendChild(item); });
+    profiles.forEach(p => { const item = document.createElement("div"); item.className = "saved-item"; makeItemAccessible(item); const n = document.createElement("span"); n.className = "saved-name"; n.textContent = p.name; const co = document.createElement("span"); co.className = "saved-coords"; co.textContent = (p.lat != null ? p.lat.toFixed(2) : "--") + ", " + (p.lon != null ? p.lon.toFixed(2) : "--"); const del = document.createElement("button"); del.className = "saved-del"; del.title = "Delete"; del.textContent = "\u00D7"; del.addEventListener("click", async e => { e.stopPropagation(); await deleteSavedItem(del, "/api/profiles/" + encodeURIComponent(p.name), loadProfiles, 'Deleted "' + p.name + '"'); }); item.appendChild(n); item.appendChild(co); item.appendChild(del); item.addEventListener("click", async e => { if (e.target.classList.contains("saved-del")) return; cancelMovementUI(); try { const r2 = await fetch("/api/profiles/" + encodeURIComponent(p.name) + "/load", { method: "POST" }); const d = await r2.json(); if (r2.ok) { toast('Profile "' + p.name + '" loaded'); if (Number.isFinite(d.profile?.speed)) setSelectedSpeed(d.profile.speed); if (d.profile?.route_mode) $("route-mode").value = d.profile.route_mode; if (coordsInRange(d.profile?.lat, d.profile?.lon)) { activeSpoofLocation = { lat: d.profile.lat, lon: d.profile.lon }; placeMarker(d.profile.lat, d.profile.lon); adoptDotAsRoamCentre(true); map.flyTo([d.profile.lat, d.profile.lon], 15); } } else toast(d.error || "Failed", "error"); } catch (e2) { toast("Error", "error"); } }); c.appendChild(item); });
     } catch (e) {}
 }
 function revealForm(id) {
@@ -2406,7 +2443,7 @@ async function loadSchedules() {
         }
         schedules.forEach(schedule => {
             const item = document.createElement("div");
-            item.className = "saved-item";
+            item.className = "saved-item schedule-item";
             const name = document.createElement("span");
             name.className = "saved-name";
             name.textContent = schedule.name + " @ " + schedule.time;
