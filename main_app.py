@@ -6,6 +6,7 @@ import re
 import threading
 import time
 import socket
+from werkzeug.serving import make_server
 
 # Handle PyInstaller frozen paths
 if getattr(sys, "frozen", False):
@@ -27,6 +28,7 @@ from device_manager import DeviceManager
 from location_service import DATA_DIR, LocationService
 
 import app as app_module
+from updater import NativeUpdater, VERSION
 
 
 class NativeApi:
@@ -34,6 +36,10 @@ class NativeApi:
 
     def __init__(self):
         self.window = None
+        self._updater = NativeUpdater()
+
+    def check_for_updates(self):
+        return self._updater.check()
 
     def save_gpx(self, content, suggested_filename="route.gpx"):
         """Show a macOS save dialog and write the exported GPX to disk."""
@@ -64,34 +70,27 @@ class NativeApi:
 
 
 def start_backend():
-    """Initialize the userspace-first device connection and Flask server."""
-    device_mgr = DeviceManager()
-    app_module.device_mgr = device_mgr
+    """Bind before opening the window; phone discovery belongs to the UI."""
+    app_module.device_mgr = DeviceManager()
     if app_module.loc_svc is None:
         app_module.loc_svc = LocationService(None, None)
-
-    print("[*] Looking for device...")
-    try:
-        device_mgr.connect(retries=3)
-        app_module.loc_svc.attach_device(device_mgr.simulator, device_mgr.bridge)
-        app_module._start_schedule_checker()
-        print("[+] Device connected")
-    except Exception:
-        print("[*] No device yet — connect from the UI")
-
-    app.run(host="127.0.0.1", port=PORT, debug=False, use_reloader=False)
-
-
-def wait_for_server(port, timeout=90):
-    """Block until Flask is accepting connections."""
-    for _ in range(timeout * 2):
+    # Keep a stable origin for webview preferences; fall back when another
+    # process owns the normal port. Reserve the socket before starting Flask.
+    with socket.socket() as listener:
+        listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         try:
-            s = socket.create_connection(("127.0.0.1", port), timeout=0.5)
-            s.close()
-            return True
-        except (ConnectionRefusedError, OSError):
-            time.sleep(0.5)
-    return False
+            listener.bind(("127.0.0.1", PORT))
+        except OSError:
+            listener.bind(("127.0.0.1", 0))
+        listener.listen()
+        server = make_server("127.0.0.1", listener.getsockname()[1], app,
+                             threaded=True, fd=listener.fileno())
+    port = server.port
+    app_module._ALLOWED_ORIGINS = frozenset({
+        f"http://127.0.0.1:{port}", f"http://localhost:{port}",
+    })
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    return server
 
 
 def _cleanup():
@@ -99,6 +98,8 @@ def _cleanup():
     print("[*] Cleaning up...")
     if app_module.loc_svc:
         app_module.loc_svc.stop_route()
+        app_module.loc_svc.stop_wander()
+        app_module.loc_svc.joystick_stop()
         app_module.loc_svc._stop_keepalive()
     if app_module.device_mgr:
         app_module.device_mgr.shutdown()
@@ -109,21 +110,17 @@ def main():
     print("  Ghostpin")
     print("=" * 44)
 
-    # Start Flask in background
-    server = threading.Thread(target=start_backend, daemon=True)
-    server.start()
-
-    if not wait_for_server(PORT):
-        print("[!] Server failed to start")
-        return
+    server = start_backend()
+    port = server.port
 
     # Try native WebView window, fall back to browser
     try:
         import webview
         native_api = NativeApi()
+        app_module._native_update_check = native_api.check_for_updates
         window = webview.create_window(
             "Ghostpin",
-            f"http://127.0.0.1:{PORT}",
+            f"http://127.0.0.1:{port}",
             width=1280,
             height=800,
             min_size=(900, 600),
@@ -132,22 +129,26 @@ def main():
             js_api=native_api,
         )
         native_api.window = window
+        window.events.loaded += native_api._updater.start
         # pywebview defaults to private mode, which discards localStorage on
         # every launch. Keep UI preferences and onboarding state in the same
         # user-writable Ghostpin data directory as saved locations/routes.
         webview_storage = os.path.join(DATA_DIR, "webview")
         os.makedirs(webview_storage, exist_ok=True)
-        webview.start(private_mode=False, storage_path=webview_storage)
+        webview.start(private_mode=False, storage_path=webview_storage,
+                      user_agent=f"Ghostpin/{VERSION} (+https://github.com/Kron00/ghostpin)")
     except Exception:
         import webbrowser
-        print(f"[*] Opening http://localhost:{PORT}")
-        webbrowser.open(f"http://localhost:{PORT}")
+        print(f"[*] Opening http://localhost:{port}")
+        webbrowser.open(f"http://localhost:{port}")
         try:
             while True:
                 time.sleep(1)
         except KeyboardInterrupt:
             pass
     finally:
+        server.shutdown()
+        server.server_close()
         _cleanup()
 
 

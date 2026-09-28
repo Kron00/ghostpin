@@ -1,12 +1,12 @@
 #!/bin/bash
-set -e
+set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 cd "$SCRIPT_DIR"
 
 APP_NAME="Ghostpin"
 BUNDLE_ID="com.ghostpin.app"
-VERSION="2.1.0"
+VERSION="$(/usr/bin/awk -F '"' '/^VERSION = / {print $2}' updater.py)"
 VENV_DIR="$SCRIPT_DIR/.venv"
 DIST_DIR="$SCRIPT_DIR/dist"
 APP_DIR="$DIST_DIR/$APP_NAME.app"
@@ -55,10 +55,7 @@ VPIP="$VENV_DIR/bin/pip"
 
 # ── 2. Dependencies ─────────────────────────────────────
 echo "[2/5] Installing dependencies..."
-"$VPIP" install --no-cache-dir -q -r requirements.txt pyinstaller 2>&1 \
-    | grep -v "already satisfied" \
-    | grep -v "pip version" \
-    | grep -v "You should consider" || true
+"$VPIP" install --no-cache-dir -q -r requirements.txt pyinstaller
 echo "      Done"
 
 # ── 3. Clean ─────────────────────────────────────────────
@@ -105,6 +102,7 @@ fi
     --add-data "static:static" \
     --add-data "LICENSE:." \
     --add-data "NOTICE.md:." \
+    --add-data "licenses:licenses" \
     --collect-all pymobiledevice3 \
     --collect-all webview \
     --copy-metadata apple-compress \
@@ -113,8 +111,7 @@ fi
     --hidden-import pymobiledevice3.remote.tunnel_service \
     --hidden-import pymobiledevice3.remote.userspace_tunnel \
     --hidden-import webview.platforms.cocoa \
-    main_app.py \
-    2>&1 | grep -E "^(INFO|WARNING|ERROR|Building)" || true
+    main_app.py
 
 if [ ! -d "$APP_DIR" ]; then
     echo "[!] Build failed"
@@ -157,6 +154,38 @@ cat > "$APP_DIR/Contents/Info.plist" << PLIST
 </dict>
 </plist>
 PLIST
+
+# Embed the pinned Sparkle distribution. Only the public key belongs in the
+# bundle; the release signing key stays in the maintainer's macOS Keychain.
+SPARKLE_CACHE="$VENV_DIR/sparkle-2.10.0"
+if [ -z "${SPARKLE_FRAMEWORK:-}" ]; then
+    if [ ! -d "$SPARKLE_CACHE/Sparkle.framework" ]; then
+        curl --fail --location --silent --show-error \
+            https://github.com/sparkle-project/Sparkle/releases/download/2.10.0/Sparkle-2.10.0.tar.xz \
+            -o "$VENV_DIR/sparkle.tar.xz"
+        ACTUAL_SHA=$(shasum -a 256 "$VENV_DIR/sparkle.tar.xz" | cut -d ' ' -f 1)
+        if [ "$ACTUAL_SHA" != "c2bf58aa8387266ac179357b1415d6f2635f044da8be41042af32425dae6da0c" ]; then
+            echo "[!] Sparkle archive checksum mismatch"; exit 1
+        fi
+        mkdir -p "$SPARKLE_CACHE"
+        tar -xf "$VENV_DIR/sparkle.tar.xz" -C "$SPARKLE_CACHE"
+    fi
+    SPARKLE_FRAMEWORK="$SPARKLE_CACHE/Sparkle.framework"
+fi
+export SPARKLE_PUBLIC_KEY="${SPARKLE_PUBLIC_KEY:-Q3hQGG9JWAbkyl6IHWk8QWPXnNTse5Vs55Ur5VerQiM=}"
+export SPARKLE_FEED_URL="${SPARKLE_FEED_URL:-https://github.com/Kron00/ghostpin/releases/latest/download/appcast.xml}"
+case "$SPARKLE_FEED_URL" in https://*) ;; *) echo "Feed must use HTTPS"; exit 1 ;; esac
+ditto "$SPARKLE_FRAMEWORK" "$APP_DIR/Contents/Frameworks/Sparkle.framework"
+"$VPYTHON" - "$APP_DIR/Contents/Info.plist" <<'PYPLIST'
+import os, plistlib, sys
+with open(sys.argv[1], "rb") as handle:
+    info = plistlib.load(handle)
+info.update(SUFeedURL=os.environ["SPARKLE_FEED_URL"],
+            SUPublicEDKey=os.environ["SPARKLE_PUBLIC_KEY"],
+            SUEnableAutomaticChecks=True)
+with open(sys.argv[1], "wb") as handle:
+    plistlib.dump(info, handle)
+PYPLIST
 
 # PyInstaller signs before this script writes final metadata. Re-sign the
 # completed bundle so macOS sees a valid, internally consistent app.

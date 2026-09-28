@@ -62,6 +62,17 @@ The app is signed ad-hoc rather than notarized, so the first launch needs an
 override: right-click Ghostpin in Applications, choose **Open**, then confirm.
 Double-clicking it the first time will be blocked by Gatekeeper.
 
+### In-app updates
+
+Use **Updates** in the top bar. Native macOS builds include Sparkle, which checks
+for new releases and can download, verify, install, and relaunch updates in the
+app. Update archives are verified against the embedded EdDSA public key. Browser
+and source builds offer the release download page instead.
+
+The first update-enabled release must be installed manually. Subsequent releases
+must publish both the DMG and its signed `appcast.xml` asset. Until that feed is
+published, Sparkle cannot retrieve updates.
+
 ### From source
 
 ```bash
@@ -86,7 +97,7 @@ Ghostpin with the phone connected and check again.
 
 ## How the connection works
 
-Ghostpin targets pymobiledevice3 10.3.1. On iOS 17.4 and newer it creates a
+Ghostpin targets pymobiledevice3 10.7.1. On iOS 17.4 and newer it creates a
 pure-Python userspace RSD tunnel inside the app process, so normal operation
 does not require root or an administrator password. During connection it also:
 
@@ -94,8 +105,14 @@ does not require root or an administrator password. During connection it also:
 2. Verifies Developer Mode.
 3. Checks for a mounted Developer Disk Image and auto-mounts one if needed.
 4. Opens DVT and its location-simulation channel.
-5. Falls back to privileged `tunneld` only if userspace tunnel/RSD creation
-   itself fails.
+5. On USB, falls back to privileged `tunneld` if userspace tunnel/RSD creation
+   fails. Wi-Fi failures return a pairing/network error without a root prompt.
+
+For Wi-Fi, first pair over USB and enable **Show this iPhone when on Wi-Fi**
+in Finder. Keep the Mac and iPhone on the same network. Wi-Fi selection is
+passed explicitly to lockdown; it never silently opens the USB transport.
+The window opens before discovery, and the connection status shows each phase.
+The local map library and controls load without an internet connection.
 
 The location keep-alive serializes all DVT writes and reasserts the current
 coordinate once per second while the phone remains connected.
@@ -120,13 +137,13 @@ It does talk to third parties for maps and search. What leaves your machine:
 
 | Service | What is sent |
 | --- | --- |
-| CARTO basemap tiles | Tile coordinates for every area you view on the map |
+| OpenStreetMap basemap tiles (no API key required) | Tile coordinates for every area you view on the map |
 | Google Maps autocomplete (keyless) | Your search query, the visible map center, and zoom |
 | Google Maps directions | Origin and destination addresses you enter for a route |
 | Photon, Nominatim | Your search query and the visible map center, as search fallbacks |
 | OSRM | Route waypoint coordinates, when a route has no precalculated geometry |
 | ipwho.is, ipinfo.io | Nothing but the request itself; your public IP is implicit, and the response is your approximate city used to place the startup marker |
-| unpkg CDN | The Leaflet library, fetched with subresource integrity |
+| GitHub | Update checks and signed release downloads; no device or location data |
 
 No device UDID, and no location you have set on the phone, is ever sent to a
 third party.
@@ -214,11 +231,27 @@ Outputs:
 
 ```text
 dist/Ghostpin.app
-dist/Ghostpin-2.1.0.dmg
+dist/Ghostpin-2.2.1.dmg
 ```
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for the full contributor guide, including
 the rule against committing device screenshots.
+
+### Publishing updates
+
+`./build.sh` embeds Sparkle 2.10.0 from a checksum-verified archive. Run
+`./prepare-update.sh` on the signing Mac after building, then upload
+`dist/appcast.xml` and `dist/Ghostpin-2.2.1.dmg` together to the matching
+`v2.2.1` GitHub release (adjust the version in `updater.py` for future releases).
+The script prepares artifacts only; it does not publish them.
+
+The private update-signing key is in macOS Keychain under account `ghostpin`.
+Keep that key backed up securely using Sparkle's documented key-management tools;
+never commit or distribute it. The public key is embedded by `build.sh`.
+`SPARKLE_FRAMEWORK`, `SPARKLE_PUBLIC_KEY`, and `SPARKLE_FEED_URL` can override the
+release configuration for a separate fork. Use a separate signing identity/feed
+for a fork; do not generate a new key for each update. See
+[Sparkle publishing documentation](https://sparkle-project.org/documentation/publishing/).
 
 ### Windows
 

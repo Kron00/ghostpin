@@ -6,7 +6,6 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 cd "$SCRIPT_DIR"
 
 VENV_DIR="$SCRIPT_DIR/.venv"
-APP_PORT=8080
 
 echo "=================================================="
 echo "  Ghostpin (Dev Mode)"
@@ -44,6 +43,5 @@ echo "[+] Dependencies ready"
 
 # The app owns a no-root in-process userspace tunnel. DeviceManager starts the
 # privileged tunneld compatibility path only if userspace RSD establishment fails.
-lsof -ti :"$APP_PORT" 2>/dev/null | xargs kill 2>/dev/null || true
 
 exec "$VENV_DIR/bin/python3" app.py

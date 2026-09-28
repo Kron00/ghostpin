@@ -8,7 +8,7 @@ import requests as http_requests
 from pymobiledevice3 import usbmux
 from pymobiledevice3.exceptions import AlreadyMountedError
 from pymobiledevice3.remote.remote_service_discovery import RemoteServiceDiscoveryService
-from pymobiledevice3.remote.userspace_tunnel import UserspaceRsdTunnel
+from transport_tunnel import TransportTunnel
 from pymobiledevice3.services.dvt.instruments.dvt_provider import DvtProvider
 from pymobiledevice3.services.dvt.instruments.location_simulation import LocationSimulation
 from pymobiledevice3.services.mobile_image_mounter import MobileImageMounterService, auto_mount
@@ -90,6 +90,7 @@ class DeviceManager:
         # app-level state lock, and holding both in opposite orders deadlocks.
         self._session_lock = threading.RLock()
         self._generation = 0
+        self.device_info.update(connecting=False, stage=None, error=None)
         atexit.register(self.shutdown)
 
     # ── Auto-reconnect ─────────────────────────────────────
@@ -182,13 +183,18 @@ class DeviceManager:
             devices = self.bridge.run(self._discover_mux_devices(), timeout=10)
             if udid:
                 devices = [device for device in devices if device["udid"] == udid]
+            if prefer_wifi:
+                devices = [device for device in devices if "WiFi" in device["connection_types"]]
             if devices:
                 selected = devices[0]
                 types = selected["connection_types"]
                 connection_type = "WiFi" if prefer_wifi and "WiFi" in types else types[0]
                 return selected["udid"], connection_type
             print(f"  [{attempt + 1}/{retries}] Waiting for a trusted iPhone...")
-            time.sleep(delay)
+            if attempt + 1 < retries:
+                time.sleep(delay)
+        if prefer_wifi:
+            raise ConnectionError("No paired Wi-Fi iPhone found. Enable Finder’s ‘Show this iPhone when on Wi-Fi’ over USB, then keep both devices on the same network and unlock the phone.")
         raise ConnectionError(
             "No trusted iPhone was found. Connect it by USB, unlock it, accept Trust, "
             "and enable Developer Mode."
@@ -214,8 +220,8 @@ class DeviceManager:
 
     # ── Tunnel and developer services ─────────────────────
 
-    async def _open_userspace_tunnel(self, udid, generation):
-        tunnel = UserspaceRsdTunnel(serial=udid)
+    async def _open_userspace_tunnel(self, udid, connection_type, generation):
+        tunnel = TransportTunnel(serial=udid, connection_type=connection_type)
         try:
             rsd = await tunnel.aopen()
         except BaseException:
@@ -279,42 +285,55 @@ class DeviceManager:
             )
         self.device_info["udid"] = peer_udid or expected_udid
 
-        developer_mode = await self.rsd.get_developer_mode_status()
+        self.device_info["stage"] = "Checking Developer Mode…"
+        developer_mode = await asyncio.wait_for(self.rsd.get_developer_mode_status(), timeout=10)
         self.device_info["developer_mode"] = bool(developer_mode)
         if not developer_mode:
             raise RuntimeError("Developer Mode is disabled on the selected iPhone.")
 
-        mounter = MobileImageMounterService(lockdown=self.rsd)
-        images = await mounter.copy_devices()
-        ddi_mounted = any(
-            image.get("DiskImageType") in {"Developer", "Personalized"}
-            and image.get("IsMounted", True)
-            for image in images
-        )
-        if not ddi_mounted:
+        # An advertised DVT service can be used immediately. Asking the image
+        # mounter first can stall for minutes over Wi-Fi even with DDI mounted.
+        services = (self.rsd.peer_info or {}).get("Services", {})
+        if DvtProvider.RSD_SERVICE_NAME not in services:
+            self.device_info["stage"] = "Checking developer disk image…"
+            mounter = MobileImageMounterService(lockdown=self.rsd)
             try:
-                await auto_mount(self.rsd)
-            except AlreadyMountedError:
-                pass
-            images = await mounter.copy_devices()
-            ddi_mounted = any(
-                image.get("DiskImageType") in {"Developer", "Personalized"}
-                and image.get("IsMounted", True)
-                for image in images
-            )
-        self.device_info["ddi_mounted"] = ddi_mounted
-        if not ddi_mounted:
-            raise RuntimeError("Developer Disk Image could not be mounted.")
+                images = await asyncio.wait_for(mounter.copy_devices(), timeout=15)
+                mounted = any(image.get("DiskImageType") in {"Developer", "Personalized"}
+                              and image.get("IsMounted", True) for image in images)
+                if not mounted:
+                    self.device_info["stage"] = "Downloading and mounting developer disk image…"
+                    try:
+                        await asyncio.wait_for(auto_mount(self.rsd), timeout=150)
+                    except AlreadyMountedError:
+                        pass
+            finally:
+                await asyncio.wait_for(mounter.close(), timeout=5)
 
+        self.device_info["stage"] = "Opening developer location service…"
         self.provider = DvtProvider(self.rsd)
-        await self.provider.connect()
+        await asyncio.wait_for(self.provider.connect(), timeout=20)
         self.simulator = LocationSimulation(self.provider)
-        await self.simulator.connect()
+        await asyncio.wait_for(self.simulator.connect(), timeout=10)
+        # A working DVT location channel is the readiness check that matters.
+        self.device_info["ddi_mounted"] = True
 
     def connect(self, udid=None, prefer_wifi=False, retries=15, delay=2):
         """Connect userspace-first, falling back to privileged tunneld only on tunnel/RSD failure."""
         with self._session_lock:
-            return self._connect_locked(udid, prefer_wifi, retries, delay)
+            self.device_info.update(connecting=True, stage="Finding paired iPhone…", error=None)
+            try:
+                if self.rsd or self.userspace_tunnel:
+                    self._disconnect_locked()
+                return self._connect_locked(udid, prefer_wifi, retries, delay)
+            except Exception as exc:
+                stage = self.device_info.get("stage") or "Connecting"
+                self._disconnect_locked()
+                message = str(exc) or f"{stage.rstrip('…')} timed out. Unlock the iPhone and retry, or connect over USB."
+                self.device_info["error"] = message
+                raise ConnectionError(message) from exc
+            finally:
+                self.device_info.update(connecting=False, stage=None)
 
     def _connect_locked(self, udid, prefer_wifi, retries, delay):
         selected_udid, connection_type = self._wait_for_device(
@@ -326,14 +345,23 @@ class DeviceManager:
         self._generation += 1
         generation = self._generation
 
+        self.device_info["stage"] = f"Opening {connection_type} tunnel…"
         try:
             self.bridge.run(
-                self._open_userspace_tunnel(selected_udid, generation), timeout=90
+                self._open_userspace_tunnel(selected_udid, connection_type, generation), timeout=25
             )
             self.device_info["tunnel_mode"] = "userspace"
             print("[+] No-root userspace tunnel established")
         except Exception as userspace_error:
             print(f"[!] Userspace tunnel/RSD failed: {userspace_error}")
+            self._generation += 1
+            if connection_type == "WiFi":
+                raise ConnectionError(
+                    "Wi-Fi tunnel failed. Unlock the iPhone, check that both devices are on "
+                    "the same network, and retry; connect over USB to refresh pairing. "
+                    f"Details: {userspace_error}"
+                ) from userspace_error
+            self.device_info["stage"] = "Starting compatibility tunnel…"
             print("[*] Falling back to privileged tunneld...")
             from tunnel_service import ensure_tunnel
 
@@ -349,8 +377,9 @@ class DeviceManager:
             self.device_info["connection_type"] = connection_type
             self.device_info["tunnel_mode"] = "tunneld"
 
+        self.device_info["stage"] = "Checking Developer Mode and preparing developer services…"
         try:
-            self.bridge.run(self._initialize_developer_services(), timeout=180)
+            self.bridge.run(self._initialize_developer_services(), timeout=215)
         except Exception:
             self.disconnect()
             raise
@@ -399,7 +428,7 @@ class DeviceManager:
             if udid is None:
                 udid = self.device_info.get("udid")
             self._disconnect_locked()
-            return self._connect_locked(udid, prefer_wifi, retries, delay)
+            return self.connect(udid, prefer_wifi, retries, delay)
 
     def get_device_info(self):
         return dict(self.device_info)

@@ -11,6 +11,7 @@ import requests as http_requests
 from flask import Flask, jsonify, request, render_template, send_from_directory
 
 from device_manager import DeviceManager
+from updater import VERSION, check_release
 from location_service import LocationService
 
 
@@ -54,15 +55,15 @@ def _reject_cross_origin_writes():
     return None
 
 
-# The page loads Leaflet from unpkg and tiles from CARTO; everything else is
+# Leaflet is bundled locally; map tiles come from OpenStreetMap. Everything else is
 # same-origin. Geocoding happens in Python, so the browser itself never needs
 # to reach a third party — connect-src stays 'self'. 'unsafe-inline' is only
 # granted to styles, which Leaflet and the panel code set as attributes.
 _CSP = "; ".join([
     "default-src 'self'",
-    "script-src 'self' https://unpkg.com",
-    "style-src 'self' https://unpkg.com 'unsafe-inline'",
-    "img-src 'self' data: blob: https://*.basemaps.cartocdn.com https://unpkg.com",
+    "script-src 'self'",
+    "style-src 'self' 'unsafe-inline'",
+    "img-src 'self' data: blob: https://tile.openstreetmap.org",
     "connect-src 'self'",
     "font-src 'self'",
     "object-src 'none'",
@@ -89,6 +90,7 @@ loc_svc = LocationService(None, None)
 _state_lock = threading.Lock()
 _schedule_thread = None
 _schedule_active = False
+_native_update_check = None
 
 # Small in-process caches keep startup fast and avoid hammering the public
 # geocoders while someone is typing.
@@ -114,6 +116,21 @@ def _check_ready():
 @app.route("/")
 def index():
     return render_template("index.html")
+
+
+@app.route("/api/update/check", methods=["POST"])
+def api_native_update():
+    if _native_update_check is None:
+        return jsonify({"handled": False})
+    return jsonify(_native_update_check())
+
+
+@app.route("/api/update")
+def api_update():
+    try:
+        return jsonify(check_release())
+    except Exception:
+        return jsonify({"error": "Could not check for updates. Check your internet connection and try again."}), 502
 
 
 @app.route("/favicon.ico")
@@ -150,22 +167,7 @@ def api_devices_list():
 
 @app.route("/api/device/switch", methods=["POST"])
 def api_device_switch():
-    if device_mgr is None:
-        return jsonify({"error": "Not initialized"}), 503
-    data = request.json or {}
-    prefer_wifi = data.get("wifi", False)
-    udid = data.get("udid")
-    try:
-        if loc_svc:
-            loc_svc._stop_keepalive()
-        info = device_mgr.reconnect(udid=udid, prefer_wifi=prefer_wifi)
-        if loc_svc:
-            loc_svc.attach_device(device_mgr.simulator, device_mgr.bridge)
-            if loc_svc.current_location:
-                loc_svc._start_keepalive()
-        return jsonify({"status": "Switched", **info})
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
+    return api_device_connect()
 
 
 @app.route("/api/device/connect", methods=["POST"])
@@ -176,13 +178,18 @@ def api_device_connect():
     prefer_wifi = data.get("wifi", False)
     udid = data.get("udid")
 
-    with _state_lock:
+    if not _state_lock.acquire(blocking=False):
+        return jsonify({"error": "A connection is already in progress"}), 409
+    try:
         if device_mgr is None:
             device_mgr = DeviceManager()
 
         if loc_svc:
-            loc_svc._stop_keepalive()
             loc_svc.stop_route()
+            loc_svc.stop_wander()
+            loc_svc.joystick_stop()
+            loc_svc._stop_keepalive()
+            loc_svc.attach_device(None, None)
 
         try:
             if device_mgr.device_info.get("connected"):
@@ -198,6 +205,8 @@ def api_device_connect():
             return jsonify({"status": "Connected", **info})
         except Exception as e:
             return jsonify({"error": str(e)}), 500
+    finally:
+        _state_lock.release()
 
 
 @app.route("/api/device/auto-reconnect", methods=["POST"])
@@ -216,7 +225,10 @@ def api_auto_reconnect():
         with _state_lock:
             if loc_svc:
                 loc_svc.stop_route()
+                loc_svc.stop_wander()
+                loc_svc.joystick_stop()
                 loc_svc._stop_keepalive()
+                loc_svc.attach_device(None, None)
 
     def on_reconnect(info):
         global loc_svc
@@ -2611,7 +2623,7 @@ def api_docs():
                 "methods": sorted(rule.methods - {"OPTIONS", "HEAD"}),
             })
     endpoints.sort(key=lambda e: e["path"])
-    return jsonify({"endpoints": endpoints, "version": "2.1.0"})
+    return jsonify({"endpoints": endpoints, "version": VERSION})
 
 
 # ── CLI Main (for start.sh usage) ─────────────────────────────
@@ -2626,18 +2638,6 @@ def main():
     print()
 
     device_mgr = DeviceManager()
-
-    print("[*] Looking for device...")
-    try:
-        info = device_mgr.connect(retries=5)
-        print(f"    UDID: {info['udid']}")
-        loc_svc.attach_device(device_mgr.simulator, device_mgr.bridge)
-        _start_schedule_checker()
-        print("[+] Device connected")
-    except Exception:
-        print("[*] No device found yet — connect from the UI")
-        # Keep local saved data available while the UI waits for a device.
-        loc_svc.attach_device(None, None)
 
     print()
     print(f"[+] Ready! Open http://localhost:{PORT} in your browser")

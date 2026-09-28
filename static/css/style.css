@@ -2045,3 +2045,6 @@ body.light #build-help { background: rgba(16, 48, 46, 0.34); }
 .help-item strong { font-size: var(--t-base); color: var(--text); font-weight: 650; }
 .help-item span { font-size: var(--t-sm); color: var(--text-secondary); line-height: 1.55; }
 .help-item em { color: var(--text); font-style: normal; font-weight: 600; }
+
+/* Darken only the basemap; route colors, pins, and controls stay unchanged. */
+.map-tiles-dark { filter: invert(1) hue-rotate(180deg) brightness(0.85) saturate(0.7); }

@@ -1,3 +1,23 @@
+## 2.2.1 — 2026-09-28
+
+- Replace CARTO tiles displaying “API KEY REQUIRED” with OpenStreetMap tiles, with visible attribution and normal browser caching.
+- Preserve light/dark map controls with a basemap-only dark filter.
+- Identify native tile requests as Ghostpin and send only the origin as referrer.
+
+## 2.2.0 — 2026-09-28
+
+- Open the native workspace before phone discovery; reserve a local server port
+  and recover from port conflicts without killing other applications.
+- Bundle Leaflet and load approximate network location in the background.
+- Open the selected Wi-Fi transport explicitly, cap tunnel setup at 25 seconds,
+  and report pairing/network failures without a privileged fallback prompt.
+- Reject overlapping connection requests, show connection stages, and stop all
+  movement writers before switching device sessions.
+- Add signed Sparkle updates to macOS builds and an Updates control with release
+  download fallback for source/browser use. Add signed appcast preparation.
+- Make dependency/build failures stop packaging and add connection/startup/update
+  regression tests to CI.
+
 # Changelog
 
 All notable changes to this project are documented in this file.

@@ -148,16 +148,15 @@ function toggleSpeedUnit() {
     loadRouteHistory();
 }
 
-const TILES = {
-    dark: {
-        url: "https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png",
-        attr: '&copy; <a href="https://carto.com/">CARTO</a> &copy; <a href="https://osm.org/">OSM</a>',
-    },
-    light: {
-        url: "https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png",
-        attr: '&copy; <a href="https://carto.com/">CARTO</a> &copy; <a href="https://osm.org/">OSM</a>',
-    },
-};
+function createMapTiles(dark) {
+    return L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", {
+        attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap contributors</a>',
+        maxZoom: 19,
+        // Send only the app origin, never a location-bearing page URL.
+        referrerPolicy: "origin",
+        className: dark ? "map-tiles-dark" : "map-tiles-light",
+    });
+}
 
 const POPULAR = [
     { name: "Times Square, NYC", lat: 40.7580, lon: -73.9855 },
@@ -200,23 +199,31 @@ document.addEventListener("DOMContentLoaded", async () => {
             applyDetectedSpeedUnit(savedHome.speed_unit);
         }
     } catch (e) {}
-    try {
-        const r = await fetch("/api/default-location");
-        const d = await r.json();
-        if (d.available && d.lat != null && d.lon != null) {
-            startupLocation = d;
-            startLat = d.lat; startLon = d.lon; startZoom = 13;
-            localStorage.setItem("last_home", JSON.stringify(d));
-            applyDetectedSpeedUnit(d.speed_unit);
-        }
-    } catch (e) {}
 
-    const tileSet = lightTheme ? TILES.light : TILES.dark;
     darkTiles = !lightTheme;
     map = L.map("map", { zoomControl: false }).setView([startLat, startLon], startZoom);
-    tileLayer = L.tileLayer(tileSet.url, { attribution: tileSet.attr, maxZoom: 19, subdomains: "abcd" }).addTo(map);
+    tileLayer = createMapTiles(darkTiles).addTo(map);
     map.on("click", onMapClick);
     if (startupLocation) showUserLocation(startupLocation);
+
+    $("btn-update").addEventListener("click", async () => {
+        const button = $("btn-update");
+        button.disabled = true;
+        try {
+            // Use the same-origin API: pywebview's generated JS bridge uses
+            // new Function(), which the application's strict CSP disallows.
+            const nativeResponse = await fetch("/api/update/check", { method: "POST" });
+            if (!nativeResponse.ok) throw new Error("Could not start the update check");
+            const nativeResult = await nativeResponse.json();
+            if (nativeResult.handled) return;
+            const response = await fetch("/api/update");
+            const release = await response.json();
+            if (!response.ok) throw new Error(release.error);
+            $("update-download").classList.toggle("hidden", !release.available);
+            toast(release.available ? "Ghostpin " + release.latest_version + " is available. Use Download update to install it." : release.message || "Ghostpin is up to date (" + release.current_version + ").");
+        } catch (error) { toast(error.message || "Update check failed", "error"); }
+        finally { button.disabled = false; }
+    });
 
     // Core buttons
     $("btn-set").addEventListener("click", setLocation);
@@ -397,6 +404,18 @@ document.addEventListener("DOMContentLoaded", async () => {
     map.on("mousemove", e => { const h = $("coord-hud"); if (h) { h.classList.remove("hidden"); $("coord-hud-text").textContent = e.latlng.lat.toFixed(6) + ", " + e.latlng.lng.toFixed(6); } });
     map.on("mouseout", () => { $("coord-hud")?.classList.add("hidden"); });
 
+    // Network location must never hold up initialization or overwrite a user's pan.
+    let mapTouched = false;
+    map.once("movestart", () => { mapTouched = true; });
+    fetch("/api/default-location").then(r => r.json()).then(d => {
+        if (!d.available || d.lat == null || d.lon == null) return;
+        startupLocation = d;
+        try { localStorage.setItem("last_home", JSON.stringify(d)); } catch (e) {}
+        applyDetectedSpeedUnit(d.speed_unit);
+        showUserLocation(d);
+        if (!mapTouched) map.setView([d.lat, d.lon], 13);
+    }).catch(() => {});
+
     // Load data
     pollDevice(); loadSaved(); loadProfiles(); loadSchedules(); loadRouteHistory(); loadRecent(); renderPopular(); updateStatusBar(); checkStealth();
     setInterval(pollDevice, 5000);
@@ -481,7 +500,7 @@ function obDone() { if ($("ob-dismiss").checked) localStorage.setItem("ob_done",
 function toast(msg, type = "success") { const dur = type === "warning" ? 5000 : 3000; const el = document.createElement("div"); el.className = "toast " + type; el.textContent = msg; $("toasts").appendChild(el); setTimeout(() => { el.classList.add("out"); setTimeout(() => el.remove(), 300); }, dur); }
 
 // ── Theme ───────────────────────────────────────────────────
-function toggleTheme() { lightTheme = !lightTheme; document.body.classList.toggle("light", lightTheme); localStorage.setItem("theme", lightTheme ? "light" : "dark"); const t = lightTheme ? TILES.light : TILES.dark; darkTiles = !lightTheme; map.removeLayer(tileLayer); tileLayer = L.tileLayer(t.url, { attribution: t.attr, maxZoom: 19, subdomains: "abcd" }).addTo(map); }
+function toggleTheme() { lightTheme = !lightTheme; document.body.classList.toggle("light", lightTheme); localStorage.setItem("theme", lightTheme ? "light" : "dark"); darkTiles = !lightTheme; map.removeLayer(tileLayer); tileLayer = createMapTiles(darkTiles).addTo(map); }
 
 // ── Coord format ────────────────────────────────────────────
 function toggleCoordFormat() {
@@ -576,7 +595,7 @@ function placeMarker(lat, lng) {
     updateCoordInputs(lat, lng); updateStatusBar();
 }
 
-function toggleTiles() { darkTiles = !darkTiles; const t = darkTiles ? TILES.dark : TILES.light; map.removeLayer(tileLayer); tileLayer = L.tileLayer(t.url, { attribution: t.attr, maxZoom: 19, subdomains: "abcd" }).addTo(map); }
+function toggleTiles() { darkTiles = !darkTiles; map.removeLayer(tileLayer); tileLayer = createMapTiles(darkTiles).addTo(map); }
 
 // ── Teleport to ─────────────────────────────────────────────
 function coordsInRange(lat, lon) {
@@ -785,6 +804,7 @@ async function pollDevice() {
     try {
         const r = await fetch("/api/device"); const d = await r.json(); const dot = $("device-dot");
         currentDeviceInfo = d;
+        if (d.connecting && $("connect-status")) $("connect-status").textContent = d.stage || "Connecting…";
         if (d.connected) {
             const ready = renderDeviceReadiness(d);
             dot.classList.toggle("connected", ready); dot.classList.toggle("degraded", !ready); const ct = d.connection_type || "USB";
@@ -802,46 +822,31 @@ async function pollDevice() {
             $("device-info-compact")?.classList.add("hidden"); $("setup-guide")?.classList.remove("hidden");
             if ($("status-conn-text")) $("status-conn-text").textContent = "--"; wasConnected = false;
             // Auto-connect on first poll if tunnel is running
-            if (!_autoConnectAttempted) { _autoConnectAttempted = true; autoConnect(); }
+            if (!_autoConnectAttempted && !d.connecting) { _autoConnectAttempted = true; autoConnect(); }
         }
     } catch (e) {}
 }
 
 async function autoConnect() {
-    // On load nobody pressed anything, so the controls stay live and only the
-    // status line reports the search. Disabling them made it look stuck.
-    const status = $("connect-status");
-    if (status) status.textContent = "Looking for your iPhone…";
-    try {
-        const r = await fetch("/api/device/connect", {
-            method: "POST", headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ wifi: false }),
-        });
-        const d = await r.json().catch(() => ({}));
-        if (r.ok) {
-            toast("Connected via " + d.connection_type + " (" + (d.tunnel_mode || "local") + ")");
-            if (status) status.textContent = "";
-            pollDevice();
-        } else if (status) {
-            status.textContent = d.error || "No iPhone found. Plug one in and press Connect USB.";
-        }
-    } catch (e) {
-        if (status) status.textContent = "No iPhone found. Plug one in and press Connect USB.";
-    }
+    return connectDevice(false);
 }
+
+let connectionPending = false;
 
 // ── Connection ──────────────────────────────────────────────
 async function connectDevice(wifi = false, udid = null) {
+    if (connectionPending) return;
+    connectionPending = true;
     const status = $("connect-status"), btnU = $("btn-connect"), btnW = $("btn-connect-wifi");
     const origU = btnU?.textContent, origW = btnW?.textContent;
-    // Only the control that was pressed shows the loading state; the other
-    // stays available so the alternative transport can still be tried.
+    if (btnU) btnU.disabled = true;
+    if (btnW) btnW.disabled = true;
     const active = wifi ? btnW : btnU;
     if (active) { active.disabled = true; active.classList.add("btn-loading"); }
     if (wifi && btnW) btnW.textContent = "Connecting...";
     else if (btnU) btnU.textContent = "Connecting...";
     if (status) status.textContent = wifi ? "Scanning for WiFi device..." : "Scanning for USB device...";
-    try { const r = await fetch("/api/device/connect", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ wifi, udid }) }); const d = await r.json(); if (r.ok) { toast("Connected via " + d.connection_type + " (" + (d.tunnel_mode || "local") + ")"); if (status) status.textContent = ""; pollDevice(); } else { toast(d.error || "Failed", "error"); if (status) status.textContent = d.error || "Failed"; } } catch (e) { toast("Connection error", "error"); if (status) status.textContent = "Error"; } finally { if (btnU) { btnU.disabled = false; btnU.classList.remove("btn-loading"); btnU.textContent = origU; } if (btnW) { btnW.disabled = false; btnW.classList.remove("btn-loading"); btnW.textContent = origW; } }
+    try { const r = await fetch("/api/device/connect", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ wifi, udid }) }); const d = await r.json(); if (r.ok) { toast("Connected via " + d.connection_type + " (" + (d.tunnel_mode || "local") + ")"); if (status) status.textContent = ""; pollDevice(); } else { toast(d.error || "Failed", "error"); if (status) status.textContent = d.error || "Failed"; } } catch (e) { toast("Connection error", "error"); if (status) status.textContent = "Error"; } finally { connectionPending = false; if (btnU) { btnU.disabled = false; btnU.classList.remove("btn-loading"); btnU.textContent = origU; } if (btnW) { btnW.disabled = false; btnW.classList.remove("btn-loading"); btnW.textContent = origW; } }
 }
 
 // ── Multi-device ────────────────────────────────────────────
