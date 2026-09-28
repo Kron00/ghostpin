@@ -90,6 +90,7 @@ class DeviceManager:
         # app-level state lock, and holding both in opposite orders deadlocks.
         self._session_lock = threading.RLock()
         self._generation = 0
+        self._reconnect_target = None
         self.device_info.update(connecting=False, stage=None, error=None)
         atexit.register(self.shutdown)
 
@@ -120,7 +121,8 @@ class DeviceManager:
     def _reconnect_loop(self):
         """Periodically check connection and reconnect if needed."""
         while self._auto_reconnect:
-            if self.device_info.get("connected") and not self._is_connection_alive():
+            if (self._reconnect_target and not self.device_info.get("connecting")
+                    and (not self.device_info.get("connected") or not self._is_connection_alive())):
                 print("[!] Device disconnected, attempting auto-reconnect...")
                 self.device_info["connected"] = False
 
@@ -135,8 +137,7 @@ class DeviceManager:
                 info = None
                 try:
                     with self._session_lock:
-                        prefer_wifi = self.device_info.get("connection_type") == "WiFi"
-                        udid = self.device_info.get("udid")
+                        udid, prefer_wifi = self._reconnect_target
                         self.disconnect()
                         info = self.connect(
                             udid=udid, prefer_wifi=prefer_wifi, retries=3, delay=2
@@ -154,7 +155,7 @@ class DeviceManager:
 
     def _is_connection_alive(self):
         """Check the harmless remote lockdown channel, never location state."""
-        if not self.rsd or not self.simulator:
+        if not self.device_info.get("connected") or not self.rsd or not self.simulator:
             return False
         try:
             self.bridge.run(self.rsd.get_date(), timeout=10)
@@ -315,6 +316,19 @@ class DeviceManager:
         await asyncio.wait_for(self.provider.connect(), timeout=20)
         self.simulator = LocationSimulation(self.provider)
         await asyncio.wait_for(self.simulator.connect(), timeout=10)
+        simulator, generation = self.simulator, self._generation
+        original_closed = simulator.service.on_closed
+
+        def channel_closed(reason=""):
+            original_closed(reason)
+            # Teardown of an old session must not mark a replacement offline.
+            if self.simulator is simulator and self._generation == generation:
+                self.device_info.update(
+                    connected=False,
+                    error="Developer location connection closed. Reconnect your iPhone.",
+                )
+
+        simulator.service.on_closed = channel_closed
         # A working DVT location channel is the readiness check that matters.
         self.device_info["ddi_mounted"] = True
 
@@ -341,6 +355,7 @@ class DeviceManager:
         )
         self.device_info["udid"] = selected_udid
         self.device_info["connection_type"] = connection_type
+        self._reconnect_target = (selected_udid, connection_type == "WiFi")
 
         self._generation += 1
         generation = self._generation

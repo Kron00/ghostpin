@@ -1117,6 +1117,24 @@ input[type="time"]::-webkit-calendar-picker-indicator { filter: invert(0.8); opa
 .saved-item:hover { background: var(--surface-hover); }
 .saved-item:active { background: var(--surface-active); }
 
+.schedule-item {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto auto;
+    column-gap: 6px;
+    row-gap: 4px;
+    cursor: default;
+}
+.schedule-item .saved-name { grid-column: 1; grid-row: 1; }
+.schedule-item .saved-coords {
+    grid-column: 1;
+    grid-row: 2;
+    min-width: 0;
+    white-space: normal;
+    overflow-wrap: anywhere;
+}
+.schedule-item .icon-btn { grid-column: 2; grid-row: 1 / 3; }
+.schedule-item .saved-del { grid-column: 3; grid-row: 1 / 3; opacity: 1; }
+
 .saved-name {
     flex: 1;
     min-width: 0;

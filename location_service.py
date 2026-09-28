@@ -222,6 +222,11 @@ class LocationService:
 
     def set_location(self, lat, lon):
         lat, lon = self.validate_coordinates(lat, lon)
+        # Profiles and schedules call this directly as well as the HTTP API.
+        # Invalidate routes still planning, not only routes already emitting.
+        self.stop_route()
+        self.joystick_stop()
+        self.stop_wander()
         # Cooldown is about how far the phone appears to have travelled, which
         # is just as true of the first jump after a reset as of any other. Use
         # the last position we knew, which outlives clear_location.
@@ -248,14 +253,14 @@ class LocationService:
         self._stop_keepalive()
         # Deliberately keep _last_known_position: the next jump is still a jump
         # from where the phone was last pretending to be.
+        # A failed device clear must remain visible and retryable. Do not tell
+        # the caller that real GPS was restored when the transport rejected it.
+        if self.simulator is not None and self.bridge is not None:
+            self._sim_clear()
         self.current_location = None
         self._cooldown_end = 0
         self._last_teleport_time = None
         self._last_teleport_coords = None
-        try:
-            self._sim_clear()
-        except Exception:
-            pass
         return {"status": "Location cleared"}
 
     def get_current(self):
@@ -354,8 +359,7 @@ class LocationService:
         if not self.current_location:
             raise ValueError("No location set. Set a location first.")
 
-        if self._route_active:
-            self.stop_route()
+        self.stop_route()
         if self._wander_active:
             self.stop_wander()
         self._joystick_direction = direction
@@ -430,8 +434,12 @@ class LocationService:
 
     def start_route(self, waypoints, speed_kmh=5, mode="once", randomize_speed=False,
                     coordinates=None, provider="osrm", speeds=None, holds=None,
-                    gps_noise=True, emit_max_hz=EMIT_MAX_HZ):
+                    gps_noise=True, emit_max_hz=EMIT_MAX_HZ, expected_generation=None):
         with self._route_state_lock:
+            if expected_generation is None:
+                expected_generation = self._route_generation
+            if expected_generation != self._route_generation:
+                raise ValueError("Route start cancelled by a newer movement command")
             if self._route_active:
                 raise ValueError("A route is already running. Stop it first.")
         waypoints = self.validate_waypoints(waypoints)
@@ -504,6 +512,9 @@ class LocationService:
                 coordinates[-1][1], coordinates[-1][0],
             ) <= 50
         )
+        with self._route_state_lock:
+            if expected_generation != self._route_generation:
+                raise ValueError("Route start cancelled by a newer movement command")
         self.joystick_stop()
         self.stop_wander()
         # The stop helpers restore keep-alive for an idle location. Stop it
@@ -512,6 +523,8 @@ class LocationService:
         self._stop_keepalive()
 
         with self._route_state_lock:
+            if expected_generation != self._route_generation:
+                raise ValueError("Route start cancelled by a newer movement command")
             if self._route_active:
                 raise ValueError("A route is already running. Stop it first.")
             self._route_generation += 1

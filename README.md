@@ -254,6 +254,7 @@ JavaScript checks also require Node.js):
 ```bash
 .venv/bin/python -m unittest discover -s tests -v
 node tests/test_interactions.cjs
+node tests/test_movement_interactions.cjs
 ```
 
 For browser QA without a phone, launch the isolated preview:

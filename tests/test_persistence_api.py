@@ -68,6 +68,13 @@ class PersistenceApiTests(unittest.TestCase):
         self.assertEqual(history.status_code, 200)
         self.assertEqual(history.get_json()[0]["lat"], 3.0)
 
+    def test_stop_controls_work_without_a_device(self):
+        generation = app_module.loc_svc._route_generation
+        for mode in ('route', 'joystick', 'wander'):
+            response = self.client.post('/api/' + mode + '/stop')
+            self.assertEqual(response.status_code, 200, response.data)
+        self.assertGreater(app_module.loc_svc._route_generation, generation)
+
     def test_device_actions_still_require_a_connection(self):
         response = self.client.post("/api/location/set", json={"lat": 1, "lon": 2})
         self.assertEqual(response.status_code, 503)
