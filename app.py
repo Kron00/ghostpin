@@ -1,18 +1,24 @@
-import json
+import gzip
+import hashlib
 import html
+import json
 import math
+import os
 import random
 import re
+import tempfile
 import threading
 import time
-from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
+import zlib
+from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
+from pathlib import Path
 
 import requests as http_requests
 from flask import Flask, jsonify, request, render_template, send_from_directory
 
 from device_manager import DeviceManager
+from location_service import DATA_DIR, LocationService
 from updater import VERSION, check_release
-from location_service import LocationService
 
 
 PORT = 8080
@@ -1072,6 +1078,14 @@ def _google_multi_stop_route(stops):
 
 _ROAM_GRAPH_CACHE = {}
 _ROAM_GRAPH_CACHE_MAX = 4
+_ROAM_GRAPH_CACHE_TTL = 24 * 60 * 60
+_ROAM_GRAPH_LOCK = threading.Lock()
+_ROAM_GRAPH_PENDING = {}
+_ROAM_DISK_CACHE_DIR = Path(DATA_DIR) / "road-cache"
+_ROAM_DISK_CACHE_VERSION = 1
+_ROAM_DISK_CACHE_LOCK = threading.Lock()
+_ROAM_DISK_MAX_BYTES = 16 * 1024 * 1024  # Per area; at most four files.
+_ROAM_DISK_MAX_DECODED_BYTES = 64 * 1024 * 1024
 # Bumped on every build so a graph evicted and rebuilt (Overpass may return
 # elements in a different order, shuffling edge IDs) gets a fresh identity. A
 # continuation carrying the old identity then falls back to a clean snap instead
@@ -1119,12 +1133,122 @@ def _roam_way_direction(tags):
     return True, True
 
 
-def _fetch_road_graph(lat, lon, radius_m):
-    """The drivable road graph inside the circle, dead ends pruned, or None."""
-    cache_key = (round(lat, 4), round(lon, 4), int(radius_m))
-    if cache_key in _ROAM_GRAPH_CACHE:
-        return _ROAM_GRAPH_CACHE[cache_key]
+def _road_cache_path(cache_key):
+    digest = hashlib.sha256(json.dumps(cache_key).encode()).hexdigest()
+    return _ROAM_DISK_CACHE_DIR / f"v{_ROAM_DISK_CACHE_VERSION}-{digest}.json.gz"
 
+
+def _valid_cached_road_element(element):
+    if not isinstance(element, dict):
+        return False
+    tags = element.get("tags", {})
+    if not isinstance(tags, dict) or any(not isinstance(value, str) for value in tags.values()):
+        return False
+    if element.get("type") == "node":
+        return isinstance(element.get("id"), int)
+    if element.get("type") != "way":
+        return False
+    nodes, geometry = element.get("nodes"), element.get("geometry")
+    return (isinstance(nodes, list) and isinstance(geometry, list)
+            and len(nodes) == len(geometry)
+            and all(isinstance(node, int) for node in nodes)
+            and all(isinstance(point, dict)
+                    and isinstance(point.get("lat"), (int, float))
+                    and isinstance(point.get("lon"), (int, float))
+                    and -90 <= point["lat"] <= 90
+                    and -180 <= point["lon"] <= 180 for point in geometry))
+
+
+def _load_road_elements(cache_key):
+    """A bounded, disposable map-data cache; never deserialize executable objects."""
+    try:
+        path = _road_cache_path(cache_key)
+        stat = path.stat()
+        if (not 0 <= time.time() - stat.st_mtime < _ROAM_GRAPH_CACHE_TTL
+                or stat.st_size > _ROAM_DISK_MAX_BYTES):
+            return None
+        with gzip.open(path, "rb") as source:
+            encoded = source.read(_ROAM_DISK_MAX_DECODED_BYTES + 1)
+        if len(encoded) > _ROAM_DISK_MAX_DECODED_BYTES:
+            return None
+        payload = json.loads(encoded)
+        if (isinstance(payload, dict)
+                and payload.get("version") == _ROAM_DISK_CACHE_VERSION
+                and payload.get("key") == list(cache_key)
+                and isinstance(payload.get("elements"), list)
+                and payload["elements"]
+                and all(_valid_cached_road_element(element) for element in payload["elements"])):
+            return payload["elements"], stat.st_mtime
+    except (OSError, EOFError, ValueError, zlib.error):
+        pass  # A missing, expired, or corrupt cache simply triggers a lookup.
+    return None
+
+
+def _save_road_elements(cache_key, elements):
+    temporary = None
+    try:
+        encoded = json.dumps({"version": _ROAM_DISK_CACHE_VERSION,
+                              "key": cache_key, "elements": elements},
+                             separators=(",", ":")).encode()
+        if len(encoded) > _ROAM_DISK_MAX_DECODED_BYTES:
+            return
+        compressed = gzip.compress(encoded, compresslevel=1)
+        if len(compressed) > _ROAM_DISK_MAX_BYTES:
+            return
+        with _ROAM_DISK_CACHE_LOCK:
+            _ROAM_DISK_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+            # Only the completed file becomes visible to another request/process.
+            with tempfile.NamedTemporaryFile(dir=_ROAM_DISK_CACHE_DIR, delete=False) as out:
+                temporary = out.name
+                out.write(compressed)
+            os.replace(temporary, _road_cache_path(cache_key))
+            temporary = None
+            files = sorted(_ROAM_DISK_CACHE_DIR.glob("*.json.gz"),
+                           key=lambda path: path.stat().st_mtime, reverse=True)
+            for path in files[_ROAM_GRAPH_CACHE_MAX:]:
+                path.unlink(missing_ok=True)
+    except (OSError, ValueError):
+        pass  # Cache permissions or a full disk must not stop a valid route.
+    finally:
+        if temporary is not None:
+            try:
+                os.unlink(temporary)
+            except OSError:
+                pass
+
+
+def _fetch_road_graph(lat, lon, radius_m):
+    """Reuse recent road data and share identical in-flight graph builds."""
+    cache_key = (round(lat, 4), round(lon, 4), int(radius_m))
+    with _ROAM_GRAPH_LOCK:
+        cached = _ROAM_GRAPH_CACHE.get(cache_key)
+        if cached and time.time() < cached["expires_at"]:
+            return cached
+        pending = _ROAM_GRAPH_PENDING.get(cache_key)
+        owner = pending is None
+        if owner:
+            pending = _ROAM_GRAPH_PENDING[cache_key] = Future()
+    if not owner:
+        return pending.result()
+    try:
+        graph = _build_road_graph(lat, lon, radius_m, cache_key)
+        with _ROAM_GRAPH_LOCK:
+            if graph:
+                if len(_ROAM_GRAPH_CACHE) >= _ROAM_GRAPH_CACHE_MAX:
+                    _ROAM_GRAPH_CACHE.pop(next(iter(_ROAM_GRAPH_CACHE)))
+                _ROAM_GRAPH_CACHE[cache_key] = graph
+        pending.set_result(graph)
+        return graph
+    except BaseException as error:
+        pending.set_exception(error)
+        raise
+    finally:
+        with _ROAM_GRAPH_LOCK:
+            _ROAM_GRAPH_PENDING.pop(cache_key, None)
+
+
+def _build_road_graph(lat, lon, radius_m, cache_key):
+    """The drivable road graph inside the circle, dead ends pruned, or None."""
     d_lat = radius_m / 111320.0
     d_lon = radius_m / (111320.0 * math.cos(math.radians(lat)))
     bbox = f"{lat - d_lat},{lon - d_lon},{lat + d_lat},{lon + d_lon}"
@@ -1135,7 +1259,13 @@ def _fetch_road_graph(lat, lon, radius_m):
         f'node[highway~"^(stop|give_way|traffic_signals)$"]({bbox});'
         ");out geom;"
     )
-    elements = _overpass_elements(query)
+    cached = _load_road_elements(cache_key)
+    fetched = cached is None
+    if fetched:
+        elements = _overpass_elements(query)
+        fetched_at = time.time()
+    else:
+        elements, fetched_at = cached
     if elements is None:
         raise http_requests.ConnectionError("Road lookup services are unavailable")
     if not elements:
@@ -1261,10 +1391,13 @@ def _fetch_road_graph(lat, lon, radius_m):
     # the node along the same ray (a ramp/freeway nose is a common example).
     # Topologically that is degree two, but visually driving in on one and out
     # on the other is a U-turn over the same corridor. Remove these geometric
-    # dead ends, then repeat ordinary leaf pruning after each batch.
-    while True:
+    # dead ends, then repeat ordinary leaf pruning after each batch. Only
+    # junctions touched by removals can acquire a new cusp; leave the rest alone.
+    affected_nodes = set(adjacency)
+    while affected_nodes:
         cusps = set()
-        for node, edge_ids in adjacency.items():
+        for node in affected_nodes:
+            edge_ids = adjacency[node]
             live = [edge_id for edge_id in edge_ids if edge_id not in removed]
             vectors = {
                 edge_id: outward_vector(node, edge_id) for edge_id in live
@@ -1280,12 +1413,13 @@ def _fetch_road_graph(lat, lon, radius_m):
         if not cusps:
             break
         removed.update(cusps)
+        affected_nodes = set()
         for edge_id in cusps:
             edge = edges[edge_id]
             adjacency[edge["a"]].discard(edge_id)
             adjacency[edge["b"]].discard(edge_id)
-        queue = [node for node, edge_ids in adjacency.items()
-                 if len([edge_id for edge_id in edge_ids if edge_id not in removed]) == 1]
+            affected_nodes.update((edge["a"], edge["b"]))
+        queue = [node for node in affected_nodes if len(adjacency[node]) == 1]
         while queue:
             node = queue.pop()
             live = [edge_id for edge_id in adjacency.get(node, ())
@@ -1298,6 +1432,7 @@ def _fetch_road_graph(lat, lon, radius_m):
             other = edge["b"] if edge["a"] == node else edge["a"]
             adjacency[node].discard(edge_id)
             adjacency[other].discard(edge_id)
+            affected_nodes.update((node, other))
             if len([candidate for candidate in adjacency[other]
                     if candidate not in removed]) == 1:
                 queue.append(other)
@@ -1493,15 +1628,17 @@ def _fetch_road_graph(lat, lon, radius_m):
     }
 
     global _ROAM_GRAPH_BUILD
-    _ROAM_GRAPH_BUILD += 1
+    with _ROAM_GRAPH_LOCK:
+        _ROAM_GRAPH_BUILD += 1
+        identity = [*cache_key, _ROAM_GRAPH_BUILD]
     graph = {"edges": edges, "adjacency": live_adjacency,
              "outgoing": outgoing, "allowed_steps": allowed_steps,
              "junction_kinds": junction_kinds, "cache_key": cache_key,
-             "identity": [*cache_key, _ROAM_GRAPH_BUILD],
-             "outward_vectors": outward_vectors}
-    if len(_ROAM_GRAPH_CACHE) >= _ROAM_GRAPH_CACHE_MAX:
-        _ROAM_GRAPH_CACHE.pop(next(iter(_ROAM_GRAPH_CACHE)))
-    _ROAM_GRAPH_CACHE[cache_key] = graph
+             "identity": identity,
+             "outward_vectors": outward_vectors,
+             "expires_at": fetched_at + _ROAM_GRAPH_CACHE_TTL}
+    if fetched:
+        _save_road_elements(cache_key, elements)
     return graph
 
 
