@@ -2,12 +2,14 @@ const vm = require('node:vm');
 const fs = require('node:fs');
 const assert = require('node:assert/strict');
 const elements = new Map();
+let clock = 0;
 function element() {
  const classes = new Set();
  return {disabled:false,textContent:'',value:'',checked:false,style:{},classList:{add:x=>classes.add(x),remove:x=>classes.delete(x),contains:x=>classes.has(x),toggle:(x,on)=>on?classes.add(x):classes.delete(x)},setAttribute(){},addEventListener(){},querySelectorAll:()=>[]};
 }
 const context = vm.createContext({console,AbortController,setTimeout,clearTimeout,
  setInterval:()=>1,clearInterval(){},localStorage:{getItem:()=>null},
+ requestAnimationFrame:()=>1,cancelAnimationFrame(){},performance:{now:()=>clock},
  document:{addEventListener(){},getElementById:id=>{if(!elements.has(id))elements.set(id,element());return elements.get(id)},querySelectorAll:()=>[],querySelector:()=>null},window:{}});
 vm.runInContext(fs.readFileSync(require('node:path').join(__dirname,'../static/js/app.js'),'utf8'), context);
 const run=code=>vm.runInContext(code,context);
@@ -149,5 +151,18 @@ const tick=()=>new Promise(resolve=>setImmediate(resolve));
  assert.equal(style.dashArray,undefined);
  assert.equal(style.smoothFactor,0);
  run('cancelMovementUI()');
- console.log('PASS: parallel roam preparation, stop/lookup failures, pending roam cancellation, reset, stale position/prefetch, joystick handoff, device readiness, driven-path preview.');
+ // Live pin playback: each fix sits at its real emit time, the pin glides
+ // between fixes, a repeat poll of one fix adds nothing, and a jump snaps.
+ run('map={distance:(a,b)=>Math.hypot(b[0]-a[0],(b[1]-a[1])*Math.cos(a[0]*Math.PI/180))*111320}; motionSamples=[];');
+ clock=1000; run('pushMotionSample({lat:48.86,lon:2.30,fix_age_ms:0})');
+ clock=1100; run('pushMotionSample({lat:48.86,lon:2.30,fix_age_ms:100})');
+ assert.equal(run('motionSamples.length'),1);
+ clock=1300; run('pushMotionSample({lat:48.86,lon:2.30002,fix_age_ms:100})');
+ assert.equal(run('motionSamples[1].t'),1200);
+ assert.equal(run('motionPositionAt(1100)[1].toFixed(5)'),'2.30001');
+ assert.equal(run('motionPositionAt(5000)[1]'),2.30002);
+ clock=1400; run('pushMotionSample({lat:49.86,lon:2.30002,fix_age_ms:0})');
+ assert.equal(run('motionSamples.length'),1);
+ run('motionSamples=[]');
+ console.log('PASS: parallel roam preparation, stop/lookup failures, pending roam cancellation, reset, stale position/prefetch, joystick handoff, device readiness, driven-path preview, smooth pin playback.');
 })().catch(error=>{console.error(error);process.exitCode=1});

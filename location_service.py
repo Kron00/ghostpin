@@ -306,15 +306,29 @@ class LocationService:
         self._last_teleport_coords = None
         return {"status": "Location cleared"}
 
+    # The fix and the moment it was accepted are stored as one tuple so a reader
+    # never pairs a new position with an old time. The UI places each polled
+    # sample at its real emit time, which keeps its interpolation evenly paced.
+    @property
+    def current_location(self):
+        return self._current_fix[0]
+
+    @current_location.setter
+    def current_location(self, value):
+        self._current_fix = (value, time.monotonic())
+
     def get_current(self, include_route=False):
-        location = self.current_location
+        location, accepted_at = self._current_fix
         snapshot = self._route_fix_snapshot
-        if not include_route or location is None or snapshot is None:
+        if not include_route or location is None:
             return location
+        age = {"fix_age_ms": round(max(0.0, time.monotonic() - accepted_at) * 1000, 1)}
+        if snapshot is None:
+            return {**location, **age}
         generation, accepted_location, plan, state = snapshot
         if (not self._route_active or generation != self._route_generation
                 or accepted_location is not location):
-            return location
+            return {**location, **age}
         end_distance = min(plan["total_distance"], state["distance"] + 400.0)
         preview = [[location["lon"], location["lat"]]]
         for index in range(state["segment"] + 1, len(plan["points"])):
@@ -323,7 +337,7 @@ class LocationService:
                 preview.append([end["lon"], end["lat"]])
                 break
             preview.append(plan["points"][index])
-        return {**location, "route_preview": preview,
+        return {**location, **age, "route_preview": preview,
                 "route_coordinate_index": plan["origins"][state["segment"]]}
 
     # ── Cooldown ───────────────────────────────────────────
