@@ -214,6 +214,8 @@ document.addEventListener("DOMContentLoaded", async () => {
     map = L.map("map", { zoomControl: false }).setView([startLat, startLon], startZoom);
     tileLayer = createMapTiles(darkTiles).addTo(map);
     map.on("click", onMapClick);
+    map.on("zoomstart dragstart", () => { motionMapBusy = true; });
+    map.on("zoomend dragend", () => { motionMapBusy = false; });
     if (startupLocation) showUserLocation(startupLocation);
 
     $("btn-update").addEventListener("click", async () => {
@@ -1422,6 +1424,7 @@ function failRoam(silent, message) {
     }
     roamActive = false;
     roamStarting = false;
+    stopMovementTracking();
     updateRoamUI();
     toast(message, "error");
 }
@@ -2241,11 +2244,105 @@ async function pollRoute() {
 function endRoute() { clearInterval(routePolling); routePolling = null; lastRouteStatus = null; narrationSpeeds = []; $("btn-route-start").disabled = routePoints.length < 2; $("btn-route-stop").disabled = true; $("btn-route-pause").classList.add("hidden"); $("btn-route-resume").classList.add("hidden"); $("route-progress").classList.add("hidden"); if ($("status-route")) $("status-route").classList.add("hidden"); if (routeTraveledLine) { map.removeLayer(routeTraveledLine); routeTraveledLine = null; } stopMovementTracking(); updateStatusBar(); }
 
 // ── Live tracking ───────────────────────────────────────────
-function startMovementTracking() { if (movementPolling) return; movementPolling = setInterval(pollPosition, 500); }
-function stopMovementTracking() { if (movementPolling) { clearInterval(movementPolling); movementPolling = null; } trailPoints = []; }
+// The phone gets 5–20 fixes a second, but the map only sees the ones a poll
+// happens to catch. Snapping the pin to each poll made it tick along. Instead
+// every polled fix is stamped with the moment the backend sent it, and the pin
+// is drawn a short, fixed delay behind the newest fix, interpolated between the
+// two fixes either side of that moment on every animation frame. The delay must
+// cover one poll interval plus the oldest a fix can be at 5 Hz fallback.
+const MOTION_POLL_MS = 150;
+const MOTION_RENDER_DELAY_MS = 400;
+// Faster than any allowed speed (300 km/h): a jump, not driving. Snap to it.
+const MOTION_SNAP_MS = 100;
+let motionSamples = [];
+let motionFrame = null;
+let motionLookahead = null;
+let motionMapBusy = false;
+
+function startMovementTracking() {
+    if (movementPolling) return;
+    movementPolling = setInterval(pollPosition, MOTION_POLL_MS);
+    if (!motionFrame) motionFrame = requestAnimationFrame(renderMotionFrame);
+}
+function stopMovementTracking() {
+    if (movementPolling) { clearInterval(movementPolling); movementPolling = null; }
+    if (motionFrame) { cancelAnimationFrame(motionFrame); motionFrame = null; }
+    trailPoints = [];
+    // Between roam chunks the phone keeps driving; keep the buffer so playback
+    // carries straight on into the next chunk instead of hopping ahead.
+    if (roamActive) return;
+    // Land exactly on the newest fix rather than wherever playback had reached.
+    const last = motionSamples[motionSamples.length - 1];
+    if (last && marker) marker.setLatLng([last.lat, last.lon]);
+    motionSamples = []; motionLookahead = null;
+}
+function pushMotionSample(loc) {
+    const ageMs = finiteNumber(loc.fix_age_ms);
+    const t = performance.now() - (ageMs != null ? ageMs : 0);
+    const last = motionSamples[motionSamples.length - 1];
+    if (last) {
+        // The same fix polled twice: nothing new happened.
+        if (last.lat === loc.lat && last.lon === loc.lon && Math.abs(t - last.t) < 50) return;
+        if (t <= last.t) return;
+        const metres = map.distance([last.lat, last.lon], [loc.lat, loc.lon]);
+        if (metres > 5 && metres / ((t - last.t) / 1000) > MOTION_SNAP_MS) motionSamples = [];
+    }
+    motionSamples.push({ t, lat: loc.lat, lon: loc.lon });
+    if (motionSamples.length > 40) motionSamples.shift();
+}
+function motionPositionAt(t) {
+    const samples = motionSamples;
+    if (!samples.length) return null;
+    if (t <= samples[0].t) return [samples[0].lat, samples[0].lon];
+    for (let i = samples.length - 1; i > 0; i--) {
+        const a = samples[i - 1], b = samples[i];
+        if (t >= a.t) {
+            if (t >= b.t) return [b.lat, b.lon];
+            const k = (t - a.t) / (b.t - a.t);
+            return [a.lat + (b.lat - a.lat) * k, a.lon + (b.lon - a.lon) * k];
+        }
+    }
+    return [samples[0].lat, samples[0].lon];
+}
+function renderMotionFrame() {
+    motionFrame = requestAnimationFrame(renderMotionFrame);
+    const pos = motionPositionAt(performance.now() - MOTION_RENDER_DELAY_MS);
+    if (!pos) return;
+    if (marker) marker.setLatLng(pos);
+    else placeMarker(pos[0], pos[1]);
+    // The lookahead starts at the drawn pin, not at the newer fix it came
+    // from, so the line never detaches from the pin between polls.
+    if (motionLookahead && roamPathLine) roamPathLine.setLatLngs([pos, ...motionLookahead]);
+    // Follow by nudging the view a pixel-exact amount each frame. A timed pan
+    // per poll moved in bursts; skip while the user is zooming or dragging.
+    if (followMode && !motionMapBusy) {
+        const offset = map.latLngToContainerPoint(pos).subtract(map.getSize().divideBy(2)).round();
+        if (offset.x || offset.y) map.panBy(offset, { animate: false, noMoveStart: true });
+    }
+}
 async function pollPosition() {
     const epoch = movementEpoch;
-    if (!deviceReady()) return; try { const r = await fetch("/api/location/current"); if (!r.ok) return; const loc = await r.json(); if (epoch !== movementEpoch) return; activeSpoofLocation = { lat: loc.lat, lon: loc.lon }; placeMarker(loc.lat, loc.lon); if (roamActive) updateRoamLookahead(loc.lat, loc.lon, loc.route_preview, loc.route_coordinate_index); if (followMode) { map.stop(); map.panTo([loc.lat, loc.lon], { animate: true, duration: 0.3, noMoveStart: true }); } } catch (e) {} }
+    if (!deviceReady()) return;
+    try {
+        const r = await fetch("/api/location/current"); if (!r.ok) return;
+        const loc = await r.json(); if (epoch !== movementEpoch) return;
+        activeSpoofLocation = { lat: loc.lat, lon: loc.lon };
+        if (!movementPolling) {
+            placeMarker(loc.lat, loc.lon);
+            if (followMode) { map.stop(); map.panTo([loc.lat, loc.lon], { animate: true, duration: 0.3, noMoveStart: true }); }
+        } else {
+            pushMotionSample(loc);
+            trailPoints.push([loc.lat, loc.lon]); if (trailPoints.length > 20) trailPoints.shift();
+            updateCoordInputs(loc.lat, loc.lon); updateStatusBar();
+        }
+        if (roamActive) {
+            updateRoamLookahead(loc.lat, loc.lon, loc.route_preview, loc.route_coordinate_index);
+            motionLookahead = movementPolling && Array.isArray(loc.route_preview) && loc.route_preview.length >= 2
+                ? [[loc.lat, loc.lon], ...loc.route_preview.slice(1).map(point => [point[1], point[0]])]
+                : null;
+        }
+    } catch (e) {}
+}
 
 // ── GPX ─────────────────────────────────────────────────────
 // ── Joystick ────────────────────────────────────────────────

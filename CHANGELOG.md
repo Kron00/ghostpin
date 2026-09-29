@@ -35,6 +35,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Glide the map pin smoothly during routes, Roam, and joystick moves instead of
+  jumping between position polls. Each fix now carries its age, the pin plays
+  back a short moment behind the phone interpolated every frame, and follow
+  mode tracks it pixel by pixel. Phone-side fix rate is unchanged.
 - Prepare Roam roads while the previous route stops, while requiring a confirmed
   stop before starting movement and keeping Stop available if cleanup fails.
 - Reuse road data for up to 24 hours across app launches, share simultaneous
