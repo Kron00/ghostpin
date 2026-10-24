@@ -452,7 +452,7 @@ document.addEventListener("DOMContentLoaded", async () => {
     }).catch(() => {});
 
     // Load data
-    pollDevice(); reconcileRouteStatus(); loadSaved(); loadProfiles(); loadSchedules(); loadRouteHistory(); loadRecent(); renderPopular(); updateStatusBar(); checkStealth();
+    pollDevice().then(reconcileRouteStatus); loadSaved(); loadProfiles(); loadSchedules(); loadRouteHistory(); loadRecent(); renderPopular(); updateStatusBar(); checkStealth();
     setInterval(pollDevice, 5000);
     setInterval(pollCooldown, 2000);
     // Reflect scheduled or externally-triggered location changes in the UI.
@@ -1610,7 +1610,9 @@ async function recoverRoamingAfterDeviceError(message) {
     try {
         const reconnect = await fetch("/api/device/connect", {
             method: "POST", headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ wifi: currentDeviceInfo?.connection_type === "WiFi" })
+            // Name the phone that was roaming; with two attached, an unnamed
+            // reconnect picks whichever is discovered first.
+            body: JSON.stringify({ wifi: currentDeviceInfo?.connection_type === "WiFi", udid: currentDeviceInfo?.udid || null })
         });
         if (!reconnect.ok) throw new Error("Device reconnect failed");
         if (!roamActive || epoch !== movementEpoch) return;
@@ -2246,6 +2248,8 @@ async function reconcileRouteStatus() {
         adaptiveFallbackSpeedKmh = adaptiveSpeed && status.adaptive === false
             ? (finiteNumber(status.target_speed_kmh) || REALISTIC_FALLBACK_KMH) : null;
         updateAdaptiveUI();
+        const target = finiteNumber(status.target_speed_kmh);
+        if (target) setSelectedSpeed(target);
         $("btn-route-start").disabled = true;
         $("btn-route-stop").disabled = false;
         $("btn-route-pause").classList.toggle("hidden", status.paused === true);
@@ -2254,6 +2258,8 @@ async function reconcileRouteStatus() {
         updateRoamUI();
         clearInterval(routePolling);
         routePolling = setInterval(pollRoute, 1000);
+        await pollPosition();
+        if (activeSpoofLocation) map.setView([activeSpoofLocation.lat, activeSpoofLocation.lon], routeFollowZoomForSpeed(target || selectedSpeed), { animate: false });
         startMovementTracking();
         await pollRoute();
     } catch (e) {}
@@ -2344,7 +2350,9 @@ async function pollPosition() {
         const r = await fetch("/api/location/current");
         if (!r.ok) {
             const detail = await r.json().catch(() => ({}));
-            if (r.status === 404 && detail.error === "No location set" && epoch === movementEpoch) {
+            // Only a spoof the UI believed in was cleared elsewhere. Without one,
+            // the marker is a picked-but-not-warped location and must survive.
+            if (r.status === 404 && detail.error === "No location set" && epoch === movementEpoch && activeSpoofLocation) {
                 activeSpoofLocation = null;
                 if (marker) { map.removeLayer(marker); marker = null; }
                 $("lat-input").value = ""; $("lon-input").value = "";
@@ -2359,9 +2367,17 @@ async function pollPosition() {
         const previous = activeSpoofLocation;
         const changed = !previous || previous.lat !== loc.lat || previous.lon !== loc.lon;
         activeSpoofLocation = { lat: loc.lat, lon: loc.lon };
+        if (loc.error && joystickDirection) {
+            joystickDirection = null;
+            _activeKeys.clear();
+            document.querySelectorAll(".joy-btn").forEach(b => b.classList.remove("active"));
+            if (!routePolling && !roamActive) stopMovementTracking();
+            toast(loc.error, "error");
+        }
         if (!movementPolling) {
-            placeMarker(loc.lat, loc.lon);
-            if (followMode) { map.stop(); map.panTo([loc.lat, loc.lon], { animate: true, duration: 0.3, noMoveStart: true }); }
+            // An unchanged spoof leaves a freshly picked marker where the user put it.
+            if (changed) placeMarker(loc.lat, loc.lon);
+            if (changed && followMode) { map.stop(); map.panTo([loc.lat, loc.lon], { animate: true, duration: 0.3, noMoveStart: true }); }
         } else {
             pushMotionSample(loc);
             updateCoordInputs(loc.lat, loc.lon); updateStatusBar();
@@ -2445,7 +2461,6 @@ function joystickStop() {
     return joystickCommand;
 }
 
-// ── Wander ──────────────────────────────────────────────────
 // ── Cooldown ────────────────────────────────────────────────
 async function pollCooldown() {
     try { const r = await fetch("/api/cooldown"); const d = await r.json(); const badge = $("cooldown-badge"), timeEl = $("cooldown-time"), bar = $("cooldown-bar");

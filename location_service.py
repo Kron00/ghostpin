@@ -12,7 +12,6 @@ import uuid
 import xml.etree.ElementTree as ET
 from datetime import datetime
 
-import requests as http_requests
 
 
 # ── Cooldown table (Pokemon Go style) ─────────────────────────
@@ -606,30 +605,17 @@ class LocationService:
         if not EMIT_MIN_HZ <= emit_cap <= EMIT_MAX_HZ:
             raise ValueError("Emission rate cap must be between 1 and 20 Hz")
 
-        if coordinates is not None:
-            if not isinstance(coordinates, list) or not (2 <= len(coordinates) <= 20000):
+        if not isinstance(coordinates, list) or not (2 <= len(coordinates) <= 20000):
+            raise ValueError("Calculated route geometry is invalid")
+        normalized = []
+        for point in coordinates:
+            if not isinstance(point, (list, tuple)) or len(point) < 2:
                 raise ValueError("Calculated route geometry is invalid")
-            normalized = []
-            for point in coordinates:
-                if not isinstance(point, (list, tuple)) or len(point) < 2:
-                    raise ValueError("Calculated route geometry is invalid")
-                lon, lat = float(point[0]), float(point[1])
-                if not (-90 <= lat <= 90 and -180 <= lon <= 180):
-                    raise ValueError("Calculated route geometry is invalid")
-                normalized.append([lon, lat])
-            coordinates = normalized
-        else:
-            coords_str = ";".join(f"{wp['lng']},{wp['lat']}" for wp in waypoints)
-            url = f"https://router.project-osrm.org/route/v1/driving/{coords_str}?geometries=geojson&overview=full"
-
-            resp = http_requests.get(url, timeout=15)
-            data = resp.json()
-
-            if data.get("code") != "Ok" or not data.get("routes"):
-                raise ValueError(f"Routing failed: {data.get('message', 'No route found')}")
-
-            route = data["routes"][0]
-            coordinates = route["geometry"]["coordinates"]
+            lon, lat = float(point[0]), float(point[1])
+            if not (-90 <= lat <= 90 and -180 <= lon <= 180):
+                raise ValueError("Calculated route geometry is invalid")
+            normalized.append([lon, lat])
+        coordinates = normalized
 
         profile = None
         if speeds is not None:

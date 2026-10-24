@@ -134,6 +134,7 @@ class MovementFlowTests(unittest.TestCase):
 
     def test_stop_during_osrm_lookup_cancels_late_start(self):
         from unittest.mock import Mock
+        import app as app_module
         response = Mock()
         response.json.return_value = {'code': 'Ok', 'routes': [{'geometry': {
             'coordinates': [[2.2945, 48.8584], [2.2945, 48.8585]]}}]}
@@ -142,10 +143,11 @@ class MovementFlowTests(unittest.TestCase):
             self.service.stop_route()
             return response
 
-        with patch.object(location_service.http_requests, 'get', delayed_lookup):
-            with self.assertRaisesRegex(ValueError, 'cancelled'):
-                self.service.start_route([{'lat': 48.8584, 'lng': 2.2945},
-                                          {'lat': 48.8585, 'lng': 2.2945}])
+        with patch.object(app_module.http_requests, 'get', delayed_lookup):
+            reply = self.client.post('/api/route/start', json={'waypoints': [
+                {'lat': 48.8584, 'lng': 2.2945}, {'lat': 48.8585, 'lng': 2.2945}]})
+        self.assertEqual(reply.status_code, 400)
+        self.assertIn('cancelled', reply.json['error'])
         self.assertEqual(self.simulator.writes, [])
         self.assertFalse(self.service._route_active)
 

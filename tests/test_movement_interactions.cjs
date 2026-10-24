@@ -191,6 +191,29 @@ const tick=()=>new Promise(resolve=>setImmediate(resolve));
  await run('pollPosition()');
  assert.equal(run('activeSpoofLocation'),null);assert.equal(run('marker'),null);
  assert.equal(elements.get('lat-input').value,'');assert.equal(elements.get('lon-input').value,'');
+ // With no spoof active, the same 404 leaves a picked-but-not-warped marker alone.
+ run('marker={}; $("lat-input").value="48.85";');
+ await run('pollPosition()');
+ assert.notEqual(run('marker'),null);assert.equal(elements.get('lat-input').value,'48.85');
+ // An unchanged spoof does not drag a freshly picked marker back to it.
+ run('var placed=0, realPlace=placeMarker; placeMarker=()=>placed++; activeSpoofLocation={lat:48.86,lon:2.30}; movementPolling=null;');
+ context.fetch=async()=>ok({lat:48.86,lon:2.30});
+ await run('pollPosition()');
+ assert.equal(run('placed'),0);
+ run('placeMarker=realPlace;');
+ // A joystick the backend gave up on is released with the backend's reason.
+ run('var notes=[]; toast=(m,k)=>notes.push([m,k]); joystickDirection="n";');
+ context.fetch=async()=>ok({lat:48.86,lon:2.30,error:'Lost contact with the iPhone'});
+ await run('pollPosition()');
+ assert.equal(run('joystickDirection'),null);assert.equal(run('JSON.stringify(notes.at(-1))'),JSON.stringify(['Lost contact with the iPhone','error']));
+ run('toast=()=>{}; marker=null; activeSpoofLocation={lat:48.86,lon:2.30};');
+ // Roam recovery reconnects the phone that was roaming, not the first one discovered.
+ const connectBodies=[];
+ context.fetch=async(url,options)=>{if(url==='/api/device/connect'){connectBodies.push(JSON.parse(options.body));return {ok:false,json:async()=>({})};}return ok({});};
+ run('roamActive=true; roamRecoveryInProgress=false; currentDeviceInfo={connected:false,udid:"PHONE-B",connection_type:"USB"};');
+ await run('recoverRoamingAfterDeviceError("Lost the iPhone.")');
+ assert.equal(connectBodies[0].udid,'PHONE-B');
+ run('roamActive=false; roamRecoveryInProgress=false; currentDeviceInfo={connected:true};');
  // A scheduled/external move refreshes consistency once, but motion polls do not.
  run('var realPlaceMarker=placeMarker,realCheckStealth=checkStealth; var checkCalls=0; placeMarker=(lat,lon)=>updateCoordInputs(lat,lon); checkStealth=async()=>checkCalls++; activeSpoofLocation={lat:48.86,lon:2.30}; movementPolling=null; followMode=false;');
  context.fetch=async()=>ok({lat:48.87,lon:2.31});

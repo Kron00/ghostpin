@@ -1348,39 +1348,6 @@ input[type="time"]::-webkit-calendar-picker-indicator { filter: invert(0.8); opa
    cursor. */
 body.map-picking #map, body.map-picking .leaflet-container { cursor: crosshair; }
 
-/* Address autocomplete, anchored under whichever field asked for it. */
-.ac-results {
-    position: absolute;
-    top: calc(100% + 4px); left: 0; right: 0;
-    max-height: 220px;
-    overflow-y: auto;
-    background: var(--surface-float);
-    border: 1px solid var(--border-strong);
-    border-radius: var(--r-md);
-    box-shadow: var(--shadow-pop);
-    z-index: 1200;
-    padding: 4px;
-    display: none;
-}
-.ac-results.visible { display: block; }
-
-.ac-item {
-    padding: 7px 9px;
-    border-radius: var(--r-xs);
-    cursor: pointer;
-    font-size: var(--t-sm);
-    color: var(--text);
-    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-}
-.ac-item:hover, .ac-item.highlighted { background: var(--surface-hover); }
-.ac-item small {
-    display: block;
-    font-size: var(--t-xs);
-    color: var(--text-tertiary);
-    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-}
-.ac-empty { padding: 10px; text-align: center; font-size: var(--t-sm); color: var(--text-tertiary); }
-
 .field-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .field-row label { font-size: var(--t-sm); color: var(--text-secondary); flex: 1; }
 
