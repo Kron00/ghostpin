@@ -299,6 +299,11 @@ document.addEventListener("DOMContentLoaded", async () => {
         }
         setRoamUnitBounds(); syncRoamRadius("field");
     });
+    const savedRoamRadius = parseFloat(localStorage.getItem("roam_radius"));
+    if (savedRoamRadius > 0) {
+        $("roam-radius").value = String(savedRoamRadius);
+        $("roam-radius-slider").value = String(savedRoamRadius);
+    }
     setRoamUnitBounds();
     updateRoamUI();
     $("btn-map-pick").addEventListener("click", () => setMapPick(mapPickTarget === "append" ? null : "append"));
@@ -580,7 +585,7 @@ function toggleCoordFormat() {
     const source = marker ? { lat: marker.getLatLng().lat, lng: marker.getLatLng().lng } : lastCoords;
     if (source) updateCoordInputs(source.lat, source.lng);
 }
-function toDMS(deg, isLon) { const dir = isLon ? (deg >= 0 ? "E" : "W") : (deg >= 0 ? "N" : "S"); deg = Math.abs(deg); const d = Math.floor(deg); const m = Math.floor((deg - d) * 60); const s = ((deg - d - m / 60) * 3600).toFixed(1); return d + "\u00B0" + m + "'" + s + '"' + dir; }
+function toDMS(deg, isLon) { const dir = isLon ? (deg >= 0 ? "E" : "W") : (deg >= 0 ? "N" : "S"); const tenths = Math.round(Math.abs(deg) * 36000); const d = Math.floor(tenths / 36000); const m = Math.floor((tenths % 36000) / 600); const s = ((tenths % 600) / 10).toFixed(1); return d + "\u00B0" + m + "'" + s + '"' + dir; }
 let lastCoords = null;
 
 // Keep the readout honest while the fields are being edited by hand.
@@ -925,9 +930,10 @@ async function pollDevice() {
     try {
         const r = await fetch("/api/device"); const d = await r.json(); const dot = $("device-dot");
         currentDeviceInfo = d;
+        let ready = false;
         if (d.connecting && $("connect-status")) $("connect-status").textContent = d.stage || "Connecting…";
         if (d.connected) {
-            const ready = renderDeviceReadiness(d);
+            ready = renderDeviceReadiness(d);
             dot.classList.toggle("connected", ready); dot.classList.toggle("degraded", !ready); const ct = d.connection_type || "USB";
             $("device-label").textContent = d.name || "iPhone";
             $("dev-ios").textContent = d.ios_version || "--"; $("dev-model").textContent = d.model || "--"; $("dev-udid").textContent = maskUdid(d.udid);
@@ -945,6 +951,7 @@ async function pollDevice() {
             // Auto-connect on first poll if tunnel is running
             if (!_autoConnectAttempted && !d.connecting) { _autoConnectAttempted = true; autoConnect(); }
         }
+        if (!ready) releaseJoystickUI();
         updateRoamUI();
     } catch (e) {}
 }
@@ -969,7 +976,7 @@ async function connectDevice(wifi = false, udid = null) {
     if (wifi && btnW) btnW.textContent = "Connecting...";
     else if (btnU) btnU.textContent = "Connecting...";
     if (status) status.textContent = wifi ? "Scanning for WiFi device..." : "Scanning for USB device...";
-    try { const r = await fetch("/api/device/connect", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ wifi, udid }) }); const d = await r.json(); if (r.ok) { toast("Connected via " + d.connection_type + " (" + (d.tunnel_mode || "local") + ")"); if (status) status.textContent = ""; pollDevice(); } else { toast(d.error || "Failed", "error"); if (status) status.textContent = d.error || "Failed"; } } catch (e) { toast("Connection error", "error"); if (status) status.textContent = "Error"; } finally { connectionPending = false; if (btnU) { btnU.disabled = false; btnU.classList.remove("btn-loading"); btnU.textContent = origU; } if (btnW) { btnW.disabled = false; btnW.classList.remove("btn-loading"); btnW.textContent = origW; } }
+    try { const r = await fetch("/api/device/connect", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ wifi, udid }) }); const d = await r.json(); if (r.ok) { if (d.location_retained === false) await clearActiveSpoof(); toast("Connected via " + d.connection_type + " (" + (d.tunnel_mode || "local") + ")"); if (status) status.textContent = ""; pollDevice(); } else { toast(d.error || "Failed", "error"); if (status) status.textContent = d.error || "Failed"; } } catch (e) { toast("Connection error", "error"); if (status) status.textContent = "Error"; } finally { connectionPending = false; if (btnU) { btnU.disabled = false; btnU.classList.remove("btn-loading"); btnU.textContent = origU; } if (btnW) { btnW.disabled = false; btnW.classList.remove("btn-loading"); btnW.textContent = origW; } }
 }
 
 // ── Multi-device ────────────────────────────────────────────
@@ -1280,6 +1287,7 @@ function syncRoamRadius(from) {
     const slider = $("roam-radius-slider"), field = $("roam-radius");
     if (from === "slider") field.value = slider.value;
     else slider.value = field.value;
+    if (parseFloat(field.value) > 0) localStorage.setItem("roam_radius", field.value);
     renderRoamArea();
     updateRoamUI();
 }
@@ -1389,6 +1397,12 @@ function failRoam(silent, message) {
     toast(message, "error");
 }
 
+async function endInvalidRoam() {
+    cancelMovementUI();
+    try { await requestMutation("/api/route/stop"); }
+    catch (error) { toast(error.message || "Could not stop roaming", "error"); }
+}
+
 function roamRadiusMetres() {
     const value = parseFloat($("roam-radius").value);
     if (!(value > 0)) return null;
@@ -1454,9 +1468,14 @@ async function startRoaming(silent = false, fromLocation = null, prefetchedData 
     // A placed dot stands in for a centre that was never explicitly picked.
     if (!silent) adoptDotAsRoamCentre();
     const radius = roamRadiusMetres();
-    if (!roamCentre || !radius) return toast("Pick a centre and a radius first", "error");
+    if (!roamCentre || !radius) {
+        if (silent) return endInvalidRoam();
+        return toast("Pick a centre and a radius first", "error");
+    }
     const speed = routeSpeedKmh();
     if (!silent) {
+        localStorage.setItem("roam_radius", $("roam-radius").value);
+        localStorage.setItem("roam_unit", roamUnitMiles !== false ? "mi" : "km");
         cancelMovementUI();
         adaptiveFallbackSpeedKmh = null;
         updateAdaptiveUI();
@@ -2250,6 +2269,9 @@ async function reconcileRouteStatus() {
         updateAdaptiveUI();
         const target = finiteNumber(status.target_speed_kmh);
         if (target) setSelectedSpeed(target);
+        followMode = true;
+        if ($("follow-mode")) $("follow-mode").checked = true;
+        if (status.mode) $("route-mode").value = status.mode;
         $("btn-route-start").disabled = true;
         $("btn-route-stop").disabled = false;
         $("btn-route-pause").classList.toggle("hidden", status.paused === true);
@@ -2259,6 +2281,21 @@ async function reconcileRouteStatus() {
         clearInterval(routePolling);
         routePolling = setInterval(pollRoute, 1000);
         await pollPosition();
+        if (roamActive && !roamCentre) {
+            const savedRadius = finiteNumber(localStorage.getItem("roam_radius"));
+            const savedUnit = localStorage.getItem("roam_unit");
+            if (activeSpoofLocation && savedRadius > 0
+                    && (savedUnit === "mi" || savedUnit === "km")) {
+                roamUnitMiles = savedUnit === "mi";
+                $("roam-radius").value = String(savedRadius);
+                $("roam-radius-slider").value = String(savedRadius);
+                setRoamUnitBounds();
+                setRoamCentre(activeSpoofLocation.lat, activeSpoofLocation.lon);
+            } else {
+                await endInvalidRoam();
+                return;
+            }
+        }
         if (activeSpoofLocation) map.setView([activeSpoofLocation.lat, activeSpoofLocation.lon], routeFollowZoomForSpeed(target || selectedSpeed), { animate: false });
         startMovementTracking();
         await pollRoute();
@@ -2343,6 +2380,17 @@ function renderMotionFrame() {
         if (offset.x || offset.y) map.panBy(offset, { animate: false, noMoveStart: true });
     }
 }
+async function clearActiveSpoof() {
+    if (!activeSpoofLocation) return false;
+    activeSpoofLocation = null;
+    if (marker) { map.removeLayer(marker); marker = null; }
+    $("lat-input").value = ""; $("lon-input").value = "";
+    lastCoords = null;
+    motionSamples = []; motionLookahead = null;
+    renderReadout(null);
+    if (!movementPolling) { _stealthDismissed = false; await checkStealth(); }
+    return true;
+}
 async function pollPosition() {
     const epoch = movementEpoch;
     if (!deviceReady()) return;
@@ -2353,13 +2401,7 @@ async function pollPosition() {
             // Only a spoof the UI believed in was cleared elsewhere. Without one,
             // the marker is a picked-but-not-warped location and must survive.
             if (r.status === 404 && detail.error === "No location set" && epoch === movementEpoch && activeSpoofLocation) {
-                activeSpoofLocation = null;
-                if (marker) { map.removeLayer(marker); marker = null; }
-                $("lat-input").value = ""; $("lon-input").value = "";
-                lastCoords = null;
-                motionSamples = []; motionLookahead = null;
-                renderReadout(null);
-                if (!movementPolling) { _stealthDismissed = false; await checkStealth(); }
+                await clearActiveSpoof();
             }
             return;
         }
@@ -2367,13 +2409,7 @@ async function pollPosition() {
         const previous = activeSpoofLocation;
         const changed = !previous || previous.lat !== loc.lat || previous.lon !== loc.lon;
         activeSpoofLocation = { lat: loc.lat, lon: loc.lon };
-        if (loc.error && joystickDirection) {
-            joystickDirection = null;
-            _activeKeys.clear();
-            document.querySelectorAll(".joy-btn").forEach(b => b.classList.remove("active"));
-            if (!routePolling && !roamActive) stopMovementTracking();
-            toast(loc.error, "error");
-        }
+        if (loc.error && joystickDirection) releaseJoystickUI(loc.error);
         if (!movementPolling) {
             // An unchanged spoof leaves a freshly picked marker where the user put it.
             if (changed) placeMarker(loc.lat, loc.lon);
@@ -2398,6 +2434,14 @@ const _keyMap = { w: "n", a: "w", s: "s", d: "e", arrowup: "n", arrowdown: "s", 
 let _activeKeys = new Set();
 let joystickCommand = Promise.resolve();
 let joystickDirection = null;
+function releaseJoystickUI(message = null) {
+    if (!joystickDirection) return;
+    joystickDirection = null;
+    _activeKeys.clear();
+    document.querySelectorAll(".joy-btn").forEach(b => b.classList.remove("active"));
+    if (!routePolling && !roamActive) stopMovementTracking();
+    if (message) toast(message, "error");
+}
 function onKeyDown(e) {
     if (e.ctrlKey || e.metaKey || e.altKey || e.repeat) return;
     const typing = e.target.isContentEditable || e.target.tagName === "INPUT" || e.target.tagName === "TEXTAREA" || e.target.tagName === "SELECT";

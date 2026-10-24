@@ -223,11 +223,33 @@ class MotionQualityTests(unittest.TestCase):
         service._joystick_direction = 'n'
 
         with patch('location_service._movement_ticks', return_value=iter([.05] * 8)), \
-                patch.object(service, '_sim_set', side_effect=RuntimeError('offline')):
+                patch.object(service, '_sim_set', side_effect=RuntimeError('offline')), \
+                patch.object(service, '_start_keepalive') as keepalive:
             service._joystick_loop()
 
         self.assertFalse(service._joystick_active)
         self.assertIn('joystick stopped', service.get_current(include_route=True)['error'])
+        keepalive.assert_called_once_with()
+
+    def test_failed_joystick_does_not_take_keepalive_from_a_new_route(self):
+        service = self.service()
+        service.current_location = {'lat': 48.8584, 'lon': 2.2945}
+        service._joystick_active = True
+        service._joystick_direction = 'n'
+        failures = []
+
+        def fail_write(*args, **kwargs):
+            failures.append(1)
+            if len(failures) == 8:
+                service._route_active = True
+            raise RuntimeError('offline')
+
+        with patch('location_service._movement_ticks', return_value=iter([.05] * 8)), \
+                patch.object(service, '_sim_set', side_effect=fail_write), \
+                patch.object(service, '_start_keepalive') as keepalive:
+            service._joystick_loop()
+
+        keepalive.assert_not_called()
 
     def test_wander_stops_and_reports_eight_consecutive_write_failures(self):
         service = self.service()
@@ -246,13 +268,15 @@ class MotionQualityTests(unittest.TestCase):
         with patch('location_service._movement_ticks',
                    side_effect=lambda active: iter([.05] * 8)), \
                 patch('location_service.random.uniform', return_value=.5), \
-                patch.object(service, '_sim_set', side_effect=fail_write):
+                patch.object(service, '_sim_set', side_effect=fail_write), \
+                patch.object(service, '_start_keepalive') as keepalive:
             service._wander_loop()
 
         self.assertEqual(len(calls), 8)
         status = service.get_wander_status()
         self.assertFalse(status['active'])
         self.assertIn('wander stopped', status['error'])
+        keepalive.assert_called_once_with()
 
     def test_signal_stop_is_exact_and_can_pull_away_again(self):
         coordinates = [[2.2945, 48.8584], [2.2955, 48.8584], [2.2965, 48.8584]]

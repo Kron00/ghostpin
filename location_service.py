@@ -129,45 +129,48 @@ SAVED_FILE = os.path.join(DATA_DIR, "saved_locations.json")
 PROFILES_FILE = os.path.join(DATA_DIR, "profiles.json")
 SCHEDULES_FILE = os.path.join(DATA_DIR, "schedules.json")
 ROUTES_FILE = os.path.join(DATA_DIR, "routes.json")
+_JSON_FILE_LOCK = threading.RLock()
 
 
 def _read_json_list(path):
-    if not os.path.exists(path):
-        return []
-    try:
-        with open(path, "r") as f:
-            return json.load(f)
-    except json.JSONDecodeError as exc:
-        corrupt_path = path + ".corrupt"
-        try:
-            os.replace(path, corrupt_path)
-        except FileNotFoundError:
+    with _JSON_FILE_LOCK:
+        if not os.path.exists(path):
             return []
-        print(f"[!] Preserved corrupt JSON as {corrupt_path}: {exc}")
-        return []
-    except IOError:
-        return []
+        try:
+            with open(path, "r") as f:
+                return json.load(f)
+        except json.JSONDecodeError as exc:
+            corrupt_path = path + ".corrupt"
+            try:
+                os.replace(path, corrupt_path)
+            except FileNotFoundError:
+                return []
+            print(f"[!] Preserved corrupt JSON as {corrupt_path}: {exc}")
+            return []
+        except IOError:
+            return []
 
 
 def _atomic_write_json(path, data):
-    directory = os.path.dirname(path) or "."
-    temporary_path = None
-    try:
-        with tempfile.NamedTemporaryFile(
-                "w", dir=directory, prefix=os.path.basename(path) + ".",
-                suffix=".tmp", delete=False) as f:
-            temporary_path = f.name
-            json.dump(data, f, indent=2)
-            f.flush()
-            os.fsync(f.fileno())
-        os.replace(temporary_path, path)
-    except BaseException:
-        if temporary_path:
-            try:
-                os.unlink(temporary_path)
-            except FileNotFoundError:
-                pass
-        raise
+    with _JSON_FILE_LOCK:
+        directory = os.path.dirname(path) or "."
+        temporary_path = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                    "w", dir=directory, prefix=os.path.basename(path) + ".",
+                    suffix=".tmp", delete=False) as f:
+                temporary_path = f.name
+                json.dump(data, f, indent=2)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(temporary_path, path)
+        except BaseException:
+            if temporary_path:
+                try:
+                    os.unlink(temporary_path)
+                except FileNotFoundError:
+                    pass
+            raise
 
 
 class LocationService:
@@ -263,9 +266,18 @@ class LocationService:
         if previous_udid is not None and next_udid != previous_udid:
             self.current_location = None
             self._route_fix_snapshot = None
+            self._last_known_position = None
+            self._last_teleport_time = None
+            self._cooldown_end = 0
             return {"location_retained": False}
         if previous_udid is not None and self.current_location:
-            self._sim_set(self.current_location["lat"], self.current_location["lon"])
+            try:
+                self._sim_set(self.current_location["lat"], self.current_location["lon"])
+            except Exception as exc:
+                print(f"[!] Could not restore cached location after reconnect: {exc}")
+                self.current_location = None
+                self._route_fix_snapshot = None
+                return {"location_retained": False}
             self._start_keepalive()
             return {"location_retained": True}
         return {"location_retained": False}
@@ -529,6 +541,8 @@ class LocationService:
     def _joystick_loop(self):
         north_speed = east_speed = 0.0
         failures = 0
+        failed = False
+        owner = threading.current_thread()
         for elapsed in _movement_ticks(lambda: self._joystick_active and self.current_location):
             north, east = self._DIRECTIONS.get(self._joystick_direction, (0, 0))
             magnitude = math.hypot(north, east) or 1.0
@@ -559,6 +573,12 @@ class LocationService:
                     )
                     print(f"[!] Joystick stopped: {exc}")
                     self._joystick_active = False
+                    failed = True
+        if (failed and self.current_location
+                and (self._joystick_thread is None or self._joystick_thread is owner)
+                and not self._route_active and not self._joystick_active
+                and not self._wander_active):
+            self._start_keepalive()
 
     # ── Movement / Routes ──────────────────────────────────
 
@@ -1941,6 +1961,8 @@ class LocationService:
 
     def _wander_loop(self):
         failures = 0
+        failed = False
+        owner = threading.current_thread()
         while self._wander_active and self.current_location:
             # Pick a random point within radius
             angle = random.uniform(0, 2 * math.pi)
@@ -1979,11 +2001,17 @@ class LocationService:
                         )
                         print(f"[!] Wander stopped: {exc}")
                         self._wander_active = False
+                        failed = True
 
             # Pause at the destination, while keeping Stop/Reset responsive.
             until = time.monotonic() + random.uniform(1, 4)
             while active() and time.monotonic() < until:
                 time.sleep(min(.05, max(0, until - time.monotonic())))
+        if (failed and self.current_location
+                and (self._wander_thread is None or self._wander_thread is owner)
+                and not self._route_active and not self._joystick_active
+                and not self._wander_active):
+            self._start_keepalive()
 
     def get_wander_status(self):
         return {

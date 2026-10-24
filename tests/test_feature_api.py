@@ -195,6 +195,24 @@ class FeatureApiTests(unittest.TestCase):
                         'error': 'Routing service unavailable',
                     })
 
+    def test_route_start_reports_structured_osrm_no_route_as_client_error(self):
+        payload = {
+            "waypoints": [{"lat": 0, "lng": 0}, {"lat": 0.01, "lng": 0.01}],
+            "speed": 5,
+        }
+        with patch.object(app_module, '_check_ready', return_value=None):
+            for code in ('NoRoute', 'NoSegment'):
+                response = Mock()
+                response.json.return_value = {"code": code, "routes": []}
+                with self.subTest(code=code), patch.object(
+                        app_module.http_requests, 'get', return_value=response):
+                    result = self.client.post('/api/route/start', json=payload)
+
+                self.assertEqual(result.status_code, 400, result.data)
+                self.assertEqual(result.get_json(), {
+                    'error': 'No drivable route between these stops',
+                })
+
     def test_short_fully_matched_routes_enable_adaptive_speed(self):
         road = {
             'type': 'way',

@@ -11,6 +11,21 @@ const context = vm.createContext({console, URLSearchParams, AbortController, set
 vm.runInContext(fs.readFileSync(require('node:path').join(__dirname, '../static/js/app.js'),'utf8'),context);
 vm.runInContext('var notices=[]; toast=(...args)=>notices.push(args);',context);
 (async()=>{
+ // DMS output is always valid input, including second/minute carry and west/south.
+ for(const [value,isLon,expected] of [
+  [40.999999,false,'41°0\'0.0"N'],
+  [-73.999999,true,'74°0\'0.0"W'],
+  [-12.345678,false,null],
+  [-73.9855,true,null],
+ ]) {
+  context.coordinate=value;context.coordinateIsLon=isLon;
+  const formatted=vm.runInContext('toDMS(coordinate,coordinateIsLon)',context);
+  if(expected)assert.equal(formatted,expected);
+  assert.doesNotMatch(formatted,/60\.0/);
+  context.formattedCoordinate=formatted;
+  const parsed=vm.runInContext('parseCoordinateValue(formattedCoordinate,coordinateIsLon)',context);
+  assert.ok(Math.abs(parsed-value)<=1/72000,`${formatted} parsed as ${parsed}`);
+ }
  // One distance formatter follows the chosen units and never invents 1 m for zero.
  vm.runInContext('speedUnit="kmh"',context);
  assert.equal(vm.runInContext('formatDistance(0)',context),'');

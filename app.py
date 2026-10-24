@@ -2418,6 +2418,10 @@ def api_route_calculate():
         return jsonify({"error": "Google Maps route service is unavailable"}), 502
 
 
+class _NoDrivableRoute(ValueError):
+    pass
+
+
 def _fetch_osrm_geometry(waypoints):
     coords = ";".join(f"{point['lng']},{point['lat']}" for point in waypoints)
     url = (f"https://router.project-osrm.org/route/v1/driving/{coords}"
@@ -2425,6 +2429,8 @@ def _fetch_osrm_geometry(waypoints):
     response = http_requests.get(url, timeout=15)
     response.raise_for_status()
     data = response.json()
+    if isinstance(data, dict) and data.get("code") in {"NoRoute", "NoSegment"}:
+        raise _NoDrivableRoute("No drivable route between these stops")
     if not isinstance(data, dict) or data.get("code") != "Ok":
         raise ValueError("OSRM did not return a route")
     routes = data.get("routes")
@@ -2494,6 +2500,8 @@ def api_route_start():
     if coordinates is None:
         try:
             coordinates = _fetch_osrm_geometry(waypoints)
+        except _NoDrivableRoute as exc:
+            return jsonify({"error": str(exc)}), 400
         except (http_requests.RequestException, json.JSONDecodeError,
                 KeyError, TypeError, ValueError):
             return jsonify({"error": "Routing service unavailable"}), 502
