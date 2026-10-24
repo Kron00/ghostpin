@@ -71,6 +71,40 @@ class FeatureApiTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.get_json()['profile']['speed'], 5)
 
+    def test_interrupted_json_save_preserves_the_previous_file(self):
+        with open(location_service.SAVED_FILE, 'w') as saved:
+            json.dump([{"name": "Old", "lat": 1, "lon": 2}], saved)
+
+        def interrupted_dump(data, stream, **kwargs):
+            stream.write('[{')
+            raise OSError('disk full')
+
+        with patch.object(location_service.json, 'dump', side_effect=interrupted_dump):
+            with self.assertRaisesRegex(OSError, 'disk full'):
+                self.service.save_location('New', 3, 4)
+
+        with open(location_service.SAVED_FILE) as saved:
+            self.assertEqual(json.load(saved), [{"name": "Old", "lat": 1, "lon": 2}])
+
+    def test_corrupt_json_is_preserved_and_logged_before_starting_fresh(self):
+        with open(location_service.PROFILES_FILE, 'w') as profiles:
+            profiles.write('[{"name": "Interrupted"')
+
+        with patch('builtins.print') as log:
+            self.assertEqual(self.service.get_profiles(), [])
+
+        corrupt = location_service.PROFILES_FILE + '.corrupt'
+        self.assertFalse(os.path.exists(location_service.PROFILES_FILE))
+        with open(corrupt) as preserved:
+            self.assertEqual(preserved.read(), '[{"name": "Interrupted"')
+        self.assertIn('corrupt', log.call_args.args[0].lower())
+
+        self.service.save_profile('Fresh')
+        with open(location_service.PROFILES_FILE) as profiles:
+            self.assertEqual(json.load(profiles)[0]['name'], 'Fresh')
+        with open(corrupt) as preserved:
+            self.assertEqual(preserved.read(), '[{"name": "Interrupted"')
+
     def test_schedules_created_in_same_millisecond_have_independent_ids(self):
         data = {"name": "Morning", "lat": 1, "lon": 2, "time": "09:30", "days": []}
         with patch.object(location_service.time, 'time', return_value=1000):

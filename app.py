@@ -215,11 +215,12 @@ def api_device_connect():
                 info = device_mgr.connect(udid=udid, prefer_wifi=prefer_wifi, retries=3)
 
             if loc_svc is None:
-                loc_svc = LocationService(device_mgr.simulator, device_mgr.bridge)
-            else:
-                loc_svc.attach_device(device_mgr.simulator, device_mgr.bridge)
+                loc_svc = LocationService(None, None)
+            attachment = loc_svc.attach_device(
+                device_mgr.simulator, device_mgr.bridge, info.get("udid")
+            )
             _start_schedule_checker()
-            return jsonify({"status": "Connected", **info})
+            return jsonify({"status": "Connected", **info, **attachment})
         except Exception as e:
             return jsonify({"error": str(e)}), 500
     finally:

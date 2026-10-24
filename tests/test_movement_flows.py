@@ -166,8 +166,24 @@ class MovementFlowTests(unittest.TestCase):
         self.assertEqual(response.status_code, 500)
         self.assertIn('Connection lost', response.json['error'])
         self.assertIsNotNone(self.service.current_location)
+        self.assertTrue(self.service._keepalive_active)
         self.assertEqual(self.client.post('/api/location/clear').status_code, 200)
         self.assertIsNone(self.service.current_location)
+
+    def test_failed_set_preserves_cooldown_and_restores_previous_keepalive(self):
+        self.service.set_location(48.86, 2.30)
+        previous_location = dict(self.service.current_location)
+        previous_teleport = self.service._last_teleport_time
+        previous_cooldown = self.service._cooldown_end
+
+        with patch.object(self.service, '_sim_set', side_effect=RuntimeError('Connection lost')):
+            response = self.client.post('/api/location/set', json={'lat': 49.0, 'lon': 3.0})
+
+        self.assertEqual(response.status_code, 500)
+        self.assertEqual(self.service.current_location, previous_location)
+        self.assertEqual(self.service._last_teleport_time, previous_teleport)
+        self.assertEqual(self.service._cooldown_end, previous_cooldown)
+        self.assertTrue(self.service._keepalive_active)
 
     def test_reset_waits_for_an_inflight_joystick_write(self):
         entered, release = threading.Event(), threading.Event()
@@ -189,6 +205,15 @@ class MovementFlowTests(unittest.TestCase):
         self.assertIsNone(self.service.current_location)
         self.assertFalse(self.service._keepalive_active)
         self.assertEqual(self.simulator.clears, 1)
+
+    def test_reset_uses_the_final_moved_fix_for_the_next_cooldown(self):
+        self.service.set_location(0, 0)
+        self.service.current_location = {'lat': 10, 'lon': 10}
+        self.service.clear_location()
+
+        self.service.set_location(10.001, 10)
+
+        self.assertEqual(self.service.get_cooldown()['total_seconds'], 60)
 
 
 if __name__ == '__main__':
