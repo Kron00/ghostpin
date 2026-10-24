@@ -26,7 +26,6 @@ let searchGeneration = 0;
 let startupLocation = null;
 let routeDistanceKm = 0;
 let routeTraveledLine = null;
-let trailPoints = [];
 let calculatedRouteCoordinates = null;
 let calculatedRouteProvider = null;
 let calculatedRouteSummary = null;
@@ -95,8 +94,18 @@ function formatSpeed(speedKmh) {
     return displaySpeedFromKmh(speedKmh) + " " + (speedUnitOrDefault() === "mph" ? "mph" : "km/h");
 }
 
-function formatRouteDistance(distanceKm) {
-    return speedUnitOrDefault() === "mph" ? (distanceKm * 0.621371).toFixed(1) + " mi" : distanceKm.toFixed(1) + " km";
+function formatDistance(distanceKm) {
+    const km = finiteNumber(distanceKm);
+    if (km == null || km <= 0) return "";
+    if (speedUnitOrDefault() === "mph") {
+        const miles = km * 0.621371;
+        if (miles < 0.1) return Math.max(1, Math.round(km * 3280.84)) + " ft";
+        if (miles < 10) return miles.toFixed(1) + " mi";
+        return Math.round(miles) + " mi";
+    }
+    if (km < 1) return Math.max(1, Math.round(km * 1000)) + " m";
+    if (km < 10) return km.toFixed(1) + " km";
+    return Math.round(km) + " km";
 }
 
 function finiteNumber(value) {
@@ -443,7 +452,7 @@ document.addEventListener("DOMContentLoaded", async () => {
     }).catch(() => {});
 
     // Load data
-    pollDevice(); loadSaved(); loadProfiles(); loadSchedules(); loadRouteHistory(); loadRecent(); renderPopular(); updateStatusBar(); checkStealth();
+    pollDevice(); reconcileRouteStatus(); loadSaved(); loadProfiles(); loadSchedules(); loadRouteHistory(); loadRecent(); renderPopular(); updateStatusBar(); checkStealth();
     setInterval(pollDevice, 5000);
     setInterval(pollCooldown, 2000);
     // Reflect scheduled or externally-triggered location changes in the UI.
@@ -460,7 +469,6 @@ function maskUdid(udid) {
     return text.length <= 12 ? "…" : text.slice(0, 6) + "…" + text.slice(-4);
 }
 function esc(s) { const d = document.createElement("div"); d.textContent = s; return d.innerHTML; }
-function escAttr(s) { return esc(s).replace(/"/g, "&quot;").replace(/'/g, "&#39;"); }
 
 // Shared mutations only report success once the server confirms it.
 async function requestMutation(url, options = {}) {
@@ -579,18 +587,14 @@ let lastCoords = null;
 function syncReadoutFromInputs() {
     const readout = $("coord-text");
     if (!readout) return;
-    const latRaw = $("lat-input").value.trim();
-    const lonRaw = $("lon-input").value.trim();
-    if (!latRaw && !lonRaw) {
+    const coords = readCoordinateInputs();
+    if (coords.empty) {
         renderReadout(null);
         lastCoords = null;
         return;
     }
-    const lat = parseFloat(latRaw), lon = parseFloat(lonRaw);
-    // In DMS the fields hold text the readout cannot render; leave it be
-    // rather than showing something wrong.
-    if (coordFormat !== "dd" || Number.isNaN(lat) || Number.isNaN(lon)) return;
-    if (Math.abs(lat) > 90 || Math.abs(lon) > 180) return;
+    const { lat, lon } = coords;
+    if (!coordsInRange(lat, lon)) return;
     renderReadout(lat, lon);
     lastCoords = { lat, lng: lon };
 }
@@ -629,9 +633,36 @@ function applyCoordInputType() {
     ["lat-input", "lon-input"].forEach(id => { if ($(id) && $(id).type !== type) $(id).type = type; });
 }
 
+function parseCoordinateValue(value, isLon) {
+    const text = value.trim();
+    if (!text) return null;
+    const decimal = Number(text);
+    if (Number.isFinite(decimal)) return decimal;
+    const match = text.match(/^(\d+(?:\.\d+)?)\s*\u00B0\s*(\d+(?:\.\d+)?)\s*'\s*(\d+(?:\.\d+)?)\s*"\s*([NSEW])$/i);
+    if (!match) return NaN;
+    const minutes = Number(match[2]), seconds = Number(match[3]);
+    const hemisphere = match[4].toUpperCase();
+    if (minutes >= 60 || seconds >= 60 || (isLon ? !"EW".includes(hemisphere) : !"NS".includes(hemisphere))) return NaN;
+    const degrees = Number(match[1]) + minutes / 60 + seconds / 3600;
+    return hemisphere === "S" || hemisphere === "W" ? -degrees : degrees;
+}
+
+function readCoordinateInputs() {
+    const latText = $("lat-input").value.trim();
+    const lonText = $("lon-input").value.trim();
+    return {
+        lat: parseCoordinateValue(latText, false),
+        lon: parseCoordinateValue(lonText, true),
+        empty: !latText && !lonText,
+    };
+}
+
 function updateCoordInputs(lat, lng) {
     lastCoords = { lat, lng };
     applyCoordInputType(); if (coordFormat === "dms") { $("lat-input").value = toDMS(lat, false); $("lon-input").value = toDMS(lng, true); } else { $("lat-input").value = lat.toFixed(6); $("lon-input").value = lng.toFixed(6); } renderReadout(lat, lng); }
+
+$("btn-coord-fmt").textContent = coordFormat.toUpperCase();
+applyCoordInputType();
 
 // ── Teleport ────────────────────────────────────────────────
 function toggleTeleport() { teleportMode = !teleportMode; $("btn-teleport").classList.toggle("active", teleportMode); $("btn-teleport").setAttribute("aria-pressed", String(teleportMode)); toast(teleportMode ? "Teleport on \u2014 click the map to move instantly" : "Teleport off", teleportMode ? "success" : "info"); }
@@ -676,7 +707,6 @@ function goToUserLocation() {
 function placeMarker(lat, lng) {
     const icon = L.divIcon({ className: "map-marker-container", html: PIN_ICON_HTML, iconSize: [30, 40], iconAnchor: [15, 38] });
     if (marker) { marker.setLatLng([lat, lng]); } else { marker = L.marker([lat, lng], { icon: icon }).addTo(map); }
-    trailPoints.push([lat, lng]); if (trailPoints.length > 20) trailPoints.shift();
     updateCoordInputs(lat, lng); updateStatusBar();
 }
 
@@ -697,8 +727,8 @@ async function teleportTo(lat, lon) {
 
 // ── Location set/clear ──────────────────────────────────────
 async function setLocation() {
-    const lat = parseFloat($("lat-input").value), lon = parseFloat($("lon-input").value);
-    if (isNaN(lat) || isNaN(lon)) return toast("Place a marker on the map first", "error");
+    const { lat, lon } = readCoordinateInputs();
+    if (!Number.isFinite(lat) || !Number.isFinite(lon)) return toast("Place a marker on the map first", "error");
     // Catch an impossible coordinate here rather than asking the phone to
     // reject it after a round trip.
     if (!coordsInRange(lat, lon)) return toast("Latitude must be within ±90 and longitude within ±180", "error");
@@ -717,7 +747,7 @@ function storePreviousLocation() { if (activeSpoofLocation) { previousLocation =
 async function undoTeleport() {
     if (!previousLocation) return toast("No previous location", "error");
     cancelMovementUI();
-    try { const r = await fetch("/api/location/set", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(previousLocation) }); if (r.ok) { activeSpoofLocation = { ...previousLocation }; adoptDotAsRoamCentre(true); toast("Undone \u2014 back to " + previousLocation.lat.toFixed(4) + ", " + previousLocation.lon.toFixed(4)); placeMarker(previousLocation.lat, previousLocation.lon); map.flyTo([previousLocation.lat, previousLocation.lon], map.getZoom(), { duration: 0.8 }); previousLocation = null; $("btn-undo").disabled = true; $("btn-undo").title = "No previous location"; _stealthDismissed = false; checkStealth(); } } catch (e) { toast("Undo failed", "error"); }
+    try { await requestMutation("/api/location/set", { headers: { "Content-Type": "application/json" }, body: JSON.stringify(previousLocation) }); activeSpoofLocation = { ...previousLocation }; adoptDotAsRoamCentre(true); toast("Undone \u2014 back to " + previousLocation.lat.toFixed(4) + ", " + previousLocation.lon.toFixed(4)); placeMarker(previousLocation.lat, previousLocation.lon); map.flyTo([previousLocation.lat, previousLocation.lon], map.getZoom(), { duration: 0.8 }); previousLocation = null; $("btn-undo").disabled = true; $("btn-undo").title = "No previous location"; _stealthDismissed = false; checkStealth(); } catch (error) { toast(error.message || "Undo failed", "error"); }
 }
 
 // ── Paste ───────────────────────────────────────────────────
@@ -799,7 +829,7 @@ async function doSearch(q) {
             title.textContent = res.name || res.display_name;
             const meta = document.createElement("div");
             meta.className = "search-item-meta";
-            const details = [res.subtitle, res.distance_km != null ? formatSearchDistance(res.distance_km) : ""].filter(Boolean);
+            const details = [res.subtitle, res.distance_km != null ? formatDistance(res.distance_km) : ""].filter(Boolean);
             meta.textContent = details.join(" · ");
             content.appendChild(title); content.appendChild(meta);
             const source = document.createElement("span");
@@ -869,12 +899,6 @@ async function doSearch(q) {
     } catch (e) { if (generation === searchGeneration && e.name !== "AbortError") renderSearchMessage("Search is temporarily unavailable", "error"); }
 }
 
-function formatSearchDistance(km) {
-    if (km < 1) return Math.max(1, Math.round(km * 1000)) + " m";
-    if (km < 10) return km.toFixed(1) + " km";
-    return Math.round(km) + " km";
-}
-
 // ── Device polling ──────────────────────────────────────────
 let wasConnected = false;
 let _autoConnectAttempted = false;
@@ -921,6 +945,7 @@ async function pollDevice() {
             // Auto-connect on first poll if tunnel is running
             if (!_autoConnectAttempted && !d.connecting) { _autoConnectAttempted = true; autoConnect(); }
         }
+        updateRoamUI();
     } catch (e) {}
 }
 
@@ -994,8 +1019,8 @@ async function loadSaved() {
 
 // ── Inline save form ────────────────────────────────────────
 function showSaveForm() {
-    setTimeout(() => revealForm("save-form"), 0); const lat = parseFloat($("lat-input").value), lon = parseFloat($("lon-input").value); if (isNaN(lat) || isNaN(lon)) return toast("Place a marker first", "error"); $("save-form").classList.remove("hidden"); $("save-name").value = ""; $("save-name").focus(); }
-async function confirmSaveLocation() { const name = $("save-name").value.trim(); if (!name) return toast("Enter a name", "error"); const lat = parseFloat($("lat-input").value), lon = parseFloat($("lon-input").value); if (!coordsInRange(lat, lon)) return toast("Choose a valid location before saving", "error"); const cat = document.querySelector(".cat-pill.active")?.dataset.cat || "default"; try { const r = await fetch("/api/saved", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ name, lat, lon, category: cat }) }); if (r.ok) { loadSaved(); setPlacesTab("saved"); toast('Saved "' + name + '"'); $("save-form").classList.add("hidden"); } else { const d = await r.json(); toast(d.error || "Failed", "error"); } } catch (e) { toast("Connection error", "error"); } }
+    setTimeout(() => revealForm("save-form"), 0); const { lat, lon } = readCoordinateInputs(); if (!coordsInRange(lat, lon)) return toast("Place a marker first", "error"); $("save-form").classList.remove("hidden"); $("save-name").value = ""; $("save-name").focus(); }
+async function confirmSaveLocation() { const name = $("save-name").value.trim(); if (!name) return toast("Enter a name", "error"); const { lat, lon } = readCoordinateInputs(); if (!coordsInRange(lat, lon)) return toast("Choose a valid location before saving", "error"); const cat = document.querySelector(".cat-pill.active")?.dataset.cat || "default"; try { const r = await fetch("/api/saved", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ name, lat, lon, category: cat }) }); if (r.ok) { loadSaved(); setPlacesTab("saved"); toast('Saved "' + name + '"'); $("save-form").classList.add("hidden"); } else { const d = await r.json(); toast(d.error || "Failed", "error"); } } catch (e) { toast("Connection error", "error"); } }
 
 // ── Route / Movement ────────────────────────────────────────
 function addRoutePoint(lat, lng, preserveCalculated = false) { if (!preserveCalculated) { calculatedRouteCoordinates = null; calculatedRouteProvider = null; calculatedRouteSummary = null; calculatedRouteHolds = null; } routePoints.push({ lat, lng }); const m = L.circleMarker([lat, lng], { radius: 6, color: MAP_INK.draft, fillColor: MAP_INK.draft, fillOpacity: 1, weight: 0 }).addTo(map); m.bindTooltip(String(routePoints.length), { permanent: true, direction: "center", className: "route-label" }); routeMarkers.push(m); if (routePoints.length >= 2) { if (routeLine) map.removeLayer(routeLine); routeLine = L.polyline(routePoints.map(p => [p.lat, p.lng]), { color: MAP_INK.draft, weight: 2, dashArray: "6 7", opacity: 0.7 }).addTo(map); } updateRouteUI(); }
@@ -1037,86 +1062,6 @@ function updateRouteUI() {
     $("route-hint").textContent = ready
         ? routePoints.length + " point" + (routePoints.length > 1 ? "s" : "") + " ready"
         : "Add at least two stops to build a route";
-}
-
-// ── Address autocomplete ─────────────────────────────────────
-// The top-bar search already resolves places; route fields deserve the same
-// rather than making people type an address exactly right and hope.
-
-function attachAutocomplete(input, resultsEl, onPick) {
-    let timer = null, items = [], cursor = -1, controller = null, generation = 0;
-
-    const close = () => { clearTimeout(timer); controller?.abort(); generation += 1; resultsEl.classList.remove("visible"); cursor = -1; };
-
-    const render = () => {
-        resultsEl.textContent = "";
-        if (!items.length) {
-            const empty = document.createElement("div");
-            empty.className = "ac-empty";
-            empty.textContent = "No matches";
-            resultsEl.appendChild(empty);
-        } else {
-            items.forEach((place, index) => {
-                const row = document.createElement("div");
-                row.className = "ac-item" + (index === cursor ? " highlighted" : "");
-                row.textContent = place.name || place.display_name;
-                if (place.subtitle) {
-                    const sub = document.createElement("small");
-                    sub.textContent = place.subtitle;
-                    row.appendChild(sub);
-                }
-                row.addEventListener("mousedown", event => {
-                    event.preventDefault();
-                    input.value = place.name || place.display_name;
-                    close();
-                    if (onPick) onPick(place);
-                });
-                resultsEl.appendChild(row);
-            });
-        }
-        resultsEl.classList.add("visible");
-    };
-
-    const search = async query => {
-        const requestGeneration = ++generation;
-        if (controller) controller.abort();
-        controller = new AbortController();
-        const centre = map ? map.getCenter() : null;
-        const params = new URLSearchParams({ q: query });
-        if (centre) { params.set("lat", centre.lat); params.set("lon", centre.lng); params.set("zoom", map.getZoom()); }
-        try {
-            const response = await fetch("/api/search?" + params, { signal: controller.signal });
-            if (!response.ok) return close();
-            const data = await response.json();
-            if (requestGeneration !== generation || input.value.trim() !== query) return;
-            items = Array.isArray(data) ? data.slice(0, 6) : [];
-            cursor = -1;
-            render();
-        } catch (error) { /* aborted or offline */ }
-    };
-
-    input.addEventListener("input", () => {
-        close();
-        items = [];
-        const query = input.value.trim();
-        if (query.length < 3) return close();
-        timer = setTimeout(() => search(query), 220);
-    });
-
-    input.addEventListener("keydown", event => {
-        if (!resultsEl.classList.contains("visible")) return;
-        if (event.key === "ArrowDown") { event.preventDefault(); cursor = Math.min(cursor + 1, items.length - 1); render(); }
-        else if (event.key === "ArrowUp") { event.preventDefault(); cursor = Math.max(cursor - 1, 0); render(); }
-        else if (event.key === "Enter" && items.length) {
-            event.preventDefault();
-            const place = items[Math.max(0, cursor)];
-            input.value = place.name || place.display_name;
-            close();
-            if (onPick) onPick(place);
-        } else if (event.key === "Escape") { close(); }
-    });
-
-    input.addEventListener("blur", () => setTimeout(close, 120));
 }
 
 // ── Multi-stop builder ───────────────────────────────────────
@@ -1291,6 +1236,7 @@ function moveStop(from, to) {
 // Roads API, so it is not an option here.
 
 let adaptiveSpeed = localStorage.getItem("adaptive_speed") === "1";
+let adaptiveFallbackSpeedKmh = null;
 
 // Realistic mode has no speed field, so the profile's untagged fallback and the
 // total-failure fallback both need a sensible cruise. ~30 mph in km/h.
@@ -1317,7 +1263,14 @@ function updateAdaptiveUI() {
     real.classList.toggle("active", adaptiveSpeed);
     real.setAttribute("aria-selected", adaptiveSpeed.toString());
     $("flat-speed-row")?.classList.toggle("hidden", adaptiveSpeed);
-    $("adaptive-note")?.classList.toggle("hidden", !adaptiveSpeed);
+    const note = $("adaptive-note");
+    if (note) {
+        note.classList.toggle("hidden", !adaptiveSpeed);
+        note.classList.toggle("adaptive-fallback", adaptiveFallbackSpeedKmh !== null);
+        note.textContent = adaptiveFallbackSpeedKmh === null
+            ? "Follows posted limits with gradual acceleration, braking into turns, and stops at signals, signs, and route stops. Where no limit is posted it uses a typical local speed."
+            : "Posted limits are unavailable for this run. Using a flat " + formatSpeed(adaptiveFallbackSpeedKmh) + " fallback speed.";
+    }
     renderCalculatedRouteStatus();
 }
 
@@ -1360,6 +1313,7 @@ let roamRecoveryInProgress = false;
 // between them has no stop-and-wait. Cleared on stop and once consumed.
 let roamPrefetch = null;
 let roamPrefetching = false;
+let roamChunkGeneration = 0;
 
 function roamChunkRequest(fromLocation, useWalkState) {
     const speed = routeSpeedKmh();
@@ -1395,8 +1349,14 @@ function prefetchNextRoamChunk() {
     if (!end) return;
     roamPrefetching = true;
     const epoch = movementEpoch;
+    const sourceChunk = roamChunkGeneration;
     fetchRoamChunkData({ lat: end[1], lon: end[0] }, true)
-        .then(result => { if (epoch === movementEpoch && roamActive && result && result.data) roamPrefetch = result.data; })
+        .then(result => {
+            if (epoch === movementEpoch && sourceChunk === roamChunkGeneration
+                    && roamActive && result && result.data) {
+                roamPrefetch = { sourceChunk, data: result.data };
+            }
+        })
         .catch(() => {})
         .finally(() => { if (epoch === movementEpoch) roamPrefetching = false; });
 }
@@ -1461,7 +1421,7 @@ function setRoamCentre(lat, lon) {
 function placedLocation() {
     if (activeSpoofLocation && Number.isFinite(activeSpoofLocation.lat) && Number.isFinite(activeSpoofLocation.lon))
         return { lat: activeSpoofLocation.lat, lon: activeSpoofLocation.lon };
-    const lat = parseFloat($("lat-input").value), lon = parseFloat($("lon-input").value);
+    const { lat, lon } = readCoordinateInputs();
     if (Number.isFinite(lat) && Number.isFinite(lon)) return { lat, lon };
     return null;
 }
@@ -1477,7 +1437,7 @@ function adoptDotAsRoamCentre(force = false) {
 }
 
 function updateRoamUI() {
-    const ready = !!roamCentre && !!roamRadiusMetres();
+    const ready = deviceReady() && !!roamCentre && !!roamRadiusMetres();
     $("btn-roam-start").disabled = !ready || roamActive || roamStarting;
     $("btn-roam-start").textContent = roamStarting ? "Finding roads…" : "Start roaming";
     $("btn-roam-stop").disabled = !roamActive && !roamStarting && !roamStopNeedsRetry;
@@ -1487,12 +1447,20 @@ function updateRoamUI() {
 
 async function startRoaming(silent = false, fromLocation = null, prefetchedData = null) {
     if (roamStarting || (silent && !roamActive)) return;
+    if (!deviceReady()) {
+        const message = "No iPhone is ready. Connect one and check Developer Mode.";
+        return silent ? failRoam(true, message) : toast(message, "error");
+    }
     // A placed dot stands in for a centre that was never explicitly picked.
     if (!silent) adoptDotAsRoamCentre();
     const radius = roamRadiusMetres();
     if (!roamCentre || !radius) return toast("Pick a centre and a radius first", "error");
     const speed = routeSpeedKmh();
-    if (!silent) cancelMovementUI();
+    if (!silent) {
+        cancelMovementUI();
+        adaptiveFallbackSpeedKmh = null;
+        updateAdaptiveUI();
+    }
     const epoch = movementEpoch;
     roamStarting = true;
     const fetchController = new AbortController();
@@ -1554,6 +1522,11 @@ async function startRoaming(silent = false, fromLocation = null, prefetchedData 
             if (epoch !== movementEpoch) return;
         }
         if (!start.ok) { return failRoam(silent, started.error || "Could not start roaming"); }
+        roamChunkGeneration += 1;
+        roamPrefetch = null;
+        const adaptiveUnavailable = startRequest.adaptive && started.adaptive === false;
+        adaptiveFallbackSpeedKmh = adaptiveUnavailable ? speed : null;
+        updateAdaptiveUI();
 
         roamWalkState = data.walk_state || null;
         roamChunkSpeeds = Array.isArray(data.speeds) ? data.speeds : null;
@@ -1578,7 +1551,10 @@ async function startRoaming(silent = false, fromLocation = null, prefetchedData 
             if (roamStart) { map.stop(); map.setView(roamStart, routeFollowZoomForSpeed(speed), { animate: false }); }
         }
         startMovementTracking();
-        if (!silent) toast("Roaming " + data.distance_km + " km of roads");
+        if (!silent) {
+            if (adaptiveUnavailable) toast("Roaming started — posted limits are unavailable; using a flat " + formatSpeed(speed) + " fallback speed.", "warning");
+            else toast("Roaming " + formatDistance(data.distance_km) + " of roads");
+        }
     } catch (e) {
         // If stopping fails, discard the parallel lookup too. Keep the local
         // controller so an old completion cannot cancel a newer attempt.
@@ -1712,12 +1688,13 @@ async function continueRoaming() {
     const epoch = movementEpoch;
     // The next chunk was prefetched from this chunk's end while it was still
     // driving, so start it straight away — no stop-and-wait at the seam.
-    if (roamPrefetch) {
-        const prefetched = roamPrefetch;
+    if (roamPrefetch?.sourceChunk === roamChunkGeneration) {
+        const prefetched = roamPrefetch.data;
         roamPrefetch = null;
         await startRoaming(true, null, prefetched);
         return;
     }
+    roamPrefetch = null;
     let fromLocation = null;
     try {
         // The tracking poll stops with the completed route, so its cached
@@ -1753,6 +1730,7 @@ function cancelMovementUI() {
     roamChunkHolds = null;
     roamPrefetch = null;
     roamPrefetching = false;
+    roamChunkGeneration += 1;
     roamRecoveryInProgress = false;
     joystickDirection = null;
     _activeKeys.clear();
@@ -2006,10 +1984,13 @@ function renderCalculatedRouteStatus() {
         : formatEtaSeconds((summary.distanceKm / speedKmh) * 3600);
     const googleParts = [];
     if (googleEta) googleParts.push("Google ETA: " + googleEta);
-    if (summary.distanceKm != null) googleParts.push(formatRouteDistance(summary.distanceKm));
+    if (summary.distanceKm != null) googleParts.push(formatDistance(summary.distanceKm));
     if (summary.routeName) googleParts.push(summary.routeName);
     let text = googleParts.join(" · ");
-    if (adaptiveSpeed) {
+    if (adaptiveSpeed && adaptiveFallbackSpeedKmh !== null) {
+        text += (text ? ". " : "") + "Posted limits are unavailable for this run; using a flat "
+            + formatSpeed(adaptiveFallbackSpeedKmh) + " fallback speed.";
+    } else if (adaptiveSpeed) {
         // Adaptive drives the posted limits, so Google's own estimate is the
         // closest guide; a flat-speed projection would be misleading.
         text += (text ? ". " : "") + "Adaptive follows posted limits, so expect close to Google's time plus junction stops.";
@@ -2017,14 +1998,17 @@ function renderCalculatedRouteStatus() {
         text += (text ? ". " : "") + "At your " + formatSpeed(speedKmh) + ": "
             + projection + ", not a promised ETA.";
     }
-    status.className = "route-address-status success";
+    status.className = "route-address-status " + (adaptiveFallbackSpeedKmh !== null ? "warning" : "success");
     status.textContent = text;
 }
 
 async function calculateAddressRoute() {
     const status = $("route-address-status");
     const routeSignature = JSON.stringify({ stops: routeStops, closeLoop });
-    const stops = routeStops.map(stop => stop.text.trim()).filter(Boolean);
+    const stops = routeStops.map(stop => {
+        const lat = Number(stop.place?.lat), lon = Number(stop.place?.lon);
+        return coordsInRange(lat, lon) ? lat + "," + lon : stop.text.trim();
+    }).filter(Boolean);
     if (stops.length < 2) return toast("Enter at least a start and a destination", "error");
     if (closeLoop && stops.length >= 2) stops.push(stops[0]);
     const button = $("btn-route-calculate");
@@ -2052,6 +2036,8 @@ async function calculateAddressRoute() {
 async function startRoute() {
     if (routePoints.length < 2 || $("btn-route-start").disabled) return;
     cancelMovementUI();
+    adaptiveFallbackSpeedKmh = null;
+    updateAdaptiveUI();
     const epoch = movementEpoch;
     routeStarting = true;
     $("btn-route-stop").disabled = false;
@@ -2060,6 +2046,9 @@ async function startRoute() {
     const routeRequest = { waypoints: routePoints, speed, mode, randomize_speed: randomize, coordinates: calculatedRouteCoordinates, provider: calculatedRouteProvider, adaptive: adaptiveSpeed };
     if (calculatedRouteHolds !== null) routeRequest.holds = calculatedRouteHolds;
     try { const r = await fetch("/api/route/start", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(routeRequest) }); const d = await r.json(); if (epoch !== movementEpoch) return; if (!r.ok) return toast(d.error || "Route failed", "error");
+    const adaptiveUnavailable = routeRequest.adaptive && d.adaptive === false;
+    adaptiveFallbackSpeedKmh = adaptiveUnavailable ? speed : null;
+    updateAdaptiveUI();
     routeDistanceKm = d.distance_km || 0;
     if (d.coordinates) {
         if (routeLine) { map.removeLayer(routeLine); routeLine = null; }
@@ -2074,7 +2063,9 @@ async function startRoute() {
     // be interrupted by that poll and leave the map at its old, wide zoom.
     map.setView(routeStart, routeFollowZoomForSpeed(speed), { animate: false });
     $("btn-route-start").disabled = true; $("btn-route-stop").disabled = false; $("btn-route-pause").classList.remove("hidden"); $("btn-route-resume").classList.add("hidden"); $("route-progress").classList.remove("hidden");
-    toast("Route started: " + formatRouteDistance(d.distance_km) + " (" + mode + ") · following"); routePolling = setInterval(pollRoute, 1000); await pollPosition(); startMovementTracking();
+    if (adaptiveUnavailable) toast("Route started — posted limits are unavailable; using a flat " + formatSpeed(speed) + " fallback speed.", "warning");
+    else toast("Route started: " + formatDistance(d.distance_km) + " (" + mode + ") · following");
+    routePolling = setInterval(pollRoute, 1000); await pollPosition(); startMovementTracking();
     } catch (e) { toast("Route error", "error"); }
     finally { if (epoch === movementEpoch) { routeStarting = false; if (!routePolling) { $("btn-route-start").disabled = routePoints.length < 2; $("btn-route-stop").disabled = true; } } }
 }
@@ -2217,7 +2208,8 @@ async function pollRoute() {
         // Distance remaining, live ETA, and percent — enough to read at a
         // glance. The planned total is shown when the route is calculated, so
         // repeating it here only widened the bar into the map controls.
-        const routeParts = [formatRouteDistance(remaining) + " left"];
+        const remainingText = formatDistance(remaining);
+        const routeParts = [remainingText ? remainingText + " left" : "Arriving"];
         if (eta != null) routeParts.push("ETA " + eta);
         routeParts.push(Math.round(progress) + "%");
         $("status-route-text").textContent = routeParts.join(" · ");
@@ -2238,6 +2230,32 @@ async function pollRoute() {
         toast("Route completed");
         if ($("btn-route-save")) $("btn-route-save").style.display = "";
     }
+    } catch (e) {}
+}
+
+async function reconcileRouteStatus() {
+    try {
+        const response = await fetch("/api/route/status");
+        if (!response.ok) return;
+        const status = await response.json();
+        if (!status.active) return;
+        lastRouteStatus = status;
+        routeDistanceKm = finiteNumber(status.distance_km) || 0;
+        roamActive = status.provider === "roam";
+        if (status.adaptive === true) adaptiveSpeed = true;
+        adaptiveFallbackSpeedKmh = adaptiveSpeed && status.adaptive === false
+            ? (finiteNumber(status.target_speed_kmh) || REALISTIC_FALLBACK_KMH) : null;
+        updateAdaptiveUI();
+        $("btn-route-start").disabled = true;
+        $("btn-route-stop").disabled = false;
+        $("btn-route-pause").classList.toggle("hidden", status.paused === true);
+        $("btn-route-resume").classList.toggle("hidden", status.paused !== true);
+        $("route-progress").classList.remove("hidden");
+        updateRoamUI();
+        clearInterval(routePolling);
+        routePolling = setInterval(pollRoute, 1000);
+        startMovementTracking();
+        await pollRoute();
     } catch (e) {}
 }
 
@@ -2267,7 +2285,6 @@ function startMovementTracking() {
 function stopMovementTracking() {
     if (movementPolling) { clearInterval(movementPolling); movementPolling = null; }
     if (motionFrame) { cancelAnimationFrame(motionFrame); motionFrame = null; }
-    trailPoints = [];
     // Between roam chunks the phone keeps driving; keep the buffer so playback
     // carries straight on into the next chunk instead of hopping ahead.
     if (roamActive) return;
@@ -2324,15 +2341,29 @@ async function pollPosition() {
     const epoch = movementEpoch;
     if (!deviceReady()) return;
     try {
-        const r = await fetch("/api/location/current"); if (!r.ok) return;
+        const r = await fetch("/api/location/current");
+        if (!r.ok) {
+            const detail = await r.json().catch(() => ({}));
+            if (r.status === 404 && detail.error === "No location set" && epoch === movementEpoch) {
+                activeSpoofLocation = null;
+                if (marker) { map.removeLayer(marker); marker = null; }
+                $("lat-input").value = ""; $("lon-input").value = "";
+                lastCoords = null;
+                motionSamples = []; motionLookahead = null;
+                renderReadout(null);
+                if (!movementPolling) { _stealthDismissed = false; await checkStealth(); }
+            }
+            return;
+        }
         const loc = await r.json(); if (epoch !== movementEpoch) return;
+        const previous = activeSpoofLocation;
+        const changed = !previous || previous.lat !== loc.lat || previous.lon !== loc.lon;
         activeSpoofLocation = { lat: loc.lat, lon: loc.lon };
         if (!movementPolling) {
             placeMarker(loc.lat, loc.lon);
             if (followMode) { map.stop(); map.panTo([loc.lat, loc.lon], { animate: true, duration: 0.3, noMoveStart: true }); }
         } else {
             pushMotionSample(loc);
-            trailPoints.push([loc.lat, loc.lon]); if (trailPoints.length > 20) trailPoints.shift();
             updateCoordInputs(loc.lat, loc.lon); updateStatusBar();
         }
         if (roamActive) {
@@ -2341,6 +2372,7 @@ async function pollPosition() {
                 ? [[loc.lat, loc.lon], ...loc.route_preview.slice(1).map(point => [point[1], point[0]])]
                 : null;
         }
+        if (!movementPolling && changed) { _stealthDismissed = false; await checkStealth(); }
     } catch (e) {}
 }
 
@@ -2390,8 +2422,7 @@ function joystickMove(direction) {
     startMovementTracking();
     joystickCommand = joystickCommand.catch(() => {}).then(async () => {
         if (epoch !== movementEpoch) return;
-        const r = await fetch("/api/joystick/move", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ direction, speed }) });
-        if (!r.ok) throw new Error("Joystick move failed");
+        await requestMutation("/api/joystick/move", { headers: { "Content-Type": "application/json" }, body: JSON.stringify({ direction, speed }) });
     }).catch(error => {
         joystickDirection = null;
         _activeKeys.clear();
@@ -2497,7 +2528,7 @@ function revealForm(id) {
 
 function showProfileForm() { $("profile-form").classList.remove("hidden");
     revealForm("profile-form"); $("profile-name").value = ""; $("profile-name").focus(); }
-async function confirmSaveProfile() { const name = $("profile-name").value.trim(); if (!name) return toast("Enter a name", "error"); const lat = parseFloat($("lat-input").value), lon = parseFloat($("lon-input").value); if (($("lat-input").value || $("lon-input").value) && !coordsInRange(lat, lon)) return toast("Choose valid coordinates or clear both fields", "error"); try { const r = await fetch("/api/profiles", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ name, lat: isNaN(lat) ? null : lat, lon: isNaN(lon) ? null : lon, speed: readSpeedKmh() || selectedSpeed, route_mode: $("route-mode").value }) }); if (r.ok) { loadProfiles(); toast('Profile "' + name + '" saved'); $("profile-form").classList.add("hidden"); } else { const d = await r.json(); toast(d.error || "Failed", "error"); } } catch (e) { toast("Error", "error"); } }
+async function confirmSaveProfile() { const name = $("profile-name").value.trim(); if (!name) return toast("Enter a name", "error"); const coords = readCoordinateInputs(); const { lat, lon } = coords; if (!coords.empty && !coordsInRange(lat, lon)) return toast("Choose valid coordinates or clear both fields", "error"); try { const r = await fetch("/api/profiles", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ name, lat: coords.empty ? null : lat, lon: coords.empty ? null : lon, speed: readSpeedKmh() || selectedSpeed, route_mode: $("route-mode").value }) }); if (r.ok) { loadProfiles(); toast('Profile "' + name + '" saved'); $("profile-form").classList.add("hidden"); } else { const d = await r.json(); toast(d.error || "Failed", "error"); } } catch (e) { toast("Error", "error"); } }
 
 // ── Schedules ───────────────────────────────────────────────
 async function toggleSchedule(button, schedule) {
@@ -2564,15 +2595,15 @@ async function loadSchedules() {
         container.appendChild(retry);
     }
 }
-function showScheduleForm() { const lat = parseFloat($("lat-input").value), lon = parseFloat($("lon-input").value); if (isNaN(lat) || isNaN(lon)) return toast("Set a location first", "error"); $("schedule-form").classList.remove("hidden");
+function showScheduleForm() { const { lat, lon } = readCoordinateInputs(); if (!coordsInRange(lat, lon)) return toast("Set a location first", "error"); $("schedule-form").classList.remove("hidden");
     setTimeout(() => revealForm("schedule-form"), 0); $("schedule-name").value = ""; $("schedule-name").focus(); }
-async function confirmAddSchedule() { const name = $("schedule-name").value.trim(); if (!name) return toast("Enter a name", "error"); const time = $("schedule-time").value; if (!time) return toast("Set a time", "error"); const lat = parseFloat($("lat-input").value), lon = parseFloat($("lon-input").value); if (!coordsInRange(lat, lon)) return toast("Choose a valid location before scheduling", "error"); const days = Array.from(document.querySelectorAll(".day-pill.active")).map(p => p.dataset.day); try { const r = await fetch("/api/schedules", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ name, lat, lon, time, days }) }); if (r.ok) { loadSchedules(); toast("Schedule created"); $("schedule-form").classList.add("hidden"); } else { const d = await r.json(); toast(d.error || "Failed", "error"); } } catch (e) { toast("Error", "error"); } }
+async function confirmAddSchedule() { const name = $("schedule-name").value.trim(); if (!name) return toast("Enter a name", "error"); const time = $("schedule-time").value; if (!time) return toast("Set a time", "error"); const { lat, lon } = readCoordinateInputs(); if (!coordsInRange(lat, lon)) return toast("Choose a valid location before scheduling", "error"); const days = Array.from(document.querySelectorAll(".day-pill.active")).map(p => p.dataset.day); try { const r = await fetch("/api/schedules", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ name, lat, lon, time, days }) }); if (r.ok) { loadSchedules(); toast("Schedule created"); $("schedule-form").classList.add("hidden"); } else { const d = await r.json(); toast(d.error || "Failed", "error"); } } catch (e) { toast("Error", "error"); } }
 
 // ── Route History ───────────────────────────────────────────
 async function loadRouteHistory() {
     try { const r = await fetch("/api/routes"); const routes = await r.json(); const c = $("route-history-list"); c.textContent = "";
     if (!routes.length) { const e = document.createElement("div"); e.className = "empty-state"; e.textContent = "No saved routes"; c.appendChild(e); return; }
-    routes.forEach(rt => { const item = document.createElement("div"); item.className = "saved-item"; makeItemAccessible(item); const n = document.createElement("span"); n.className = "saved-name"; n.textContent = rt.name; const co = document.createElement("span"); co.className = "saved-coords"; co.textContent = rt.distance_km != null ? formatRouteDistance(rt.distance_km) : "?"; const del = document.createElement("button"); del.className = "saved-del"; del.title = "Delete"; del.textContent = "\u00D7"; del.addEventListener("click", async e => { e.stopPropagation(); await deleteSavedItem(del, "/api/routes/" + encodeURIComponent(rt.id), loadRouteHistory, "Route deleted"); }); item.appendChild(n); item.appendChild(co); item.appendChild(del); item.addEventListener("click", e => { if (e.target.classList.contains("saved-del")) return; if (rt.waypoints && rt.waypoints.length >= 2) {
+    routes.forEach(rt => { const item = document.createElement("div"); item.className = "saved-item"; makeItemAccessible(item); const n = document.createElement("span"); n.className = "saved-name"; n.textContent = rt.name; const co = document.createElement("span"); co.className = "saved-coords"; co.textContent = rt.distance_km != null ? (formatDistance(rt.distance_km) || "?") : "?"; const del = document.createElement("button"); del.className = "saved-del"; del.title = "Delete"; del.textContent = "\u00D7"; del.addEventListener("click", async e => { e.stopPropagation(); await deleteSavedItem(del, "/api/routes/" + encodeURIComponent(rt.id), loadRouteHistory, "Route deleted"); }); item.appendChild(n); item.appendChild(co); item.appendChild(del); item.addEventListener("click", e => { if (e.target.classList.contains("saved-del")) return; if (rt.waypoints && rt.waypoints.length >= 2) {
             clearRoutePoints();
             if (Number.isFinite(rt.speed)) setSelectedSpeed(rt.speed);
             if (rt.mode) $("route-mode").value = rt.mode;

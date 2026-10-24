@@ -1395,7 +1395,10 @@ body.map-picking #map, body.map-picking .leaflet-container { cursor: crosshair; 
 }
 .route-address-status.error { color: var(--danger); background: var(--danger-bg); }
 .route-address-status.success { color: var(--live); background: var(--live-bg); }
+.route-address-status.warning { color: var(--warn); background: var(--warn-bg); }
 .route-address-status.loading { color: var(--text-tertiary); }
+
+.hint.adaptive-fallback { color: var(--warn); }
 
 .route-options { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
 
