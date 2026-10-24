@@ -1,6 +1,7 @@
 import json
 import os
 import tempfile
+import threading
 import unittest
 from unittest.mock import patch
 
@@ -78,6 +79,46 @@ class PersistenceApiTests(unittest.TestCase):
     def test_device_actions_still_require_a_connection(self):
         response = self.client.post("/api/location/set", json={"lat": 1, "lon": 2})
         self.assertEqual(response.status_code, 503)
+
+    def test_corrupt_file_quarantine_cannot_remove_a_concurrent_save(self):
+        path = os.path.join(self.temp_dir.name, "race.json")
+        with open(path, "w", encoding="utf-8") as handle:
+            handle.write("not json")
+
+        quarantine_started = threading.Event()
+        writer_replaced = threading.Event()
+        release_quarantine = threading.Event()
+        original_replace = os.replace
+
+        def coordinated_replace(source, destination):
+            if source == path and destination == path + ".corrupt":
+                quarantine_started.set()
+                release_quarantine.wait(timeout=2)
+            result = original_replace(source, destination)
+            if destination == path:
+                writer_replaced.set()
+            return result
+
+        reader = threading.Thread(target=location_service._read_json_list, args=(path,))
+        writer = threading.Thread(
+            target=location_service._atomic_write_json,
+            args=(path, [{"name": "New"}]),
+        )
+        with patch.object(location_service.os, "replace", side_effect=coordinated_replace):
+            reader.start()
+            self.assertTrue(quarantine_started.wait(timeout=1))
+            writer.start()
+            writer_replaced.wait(timeout=.2)
+            release_quarantine.set()
+            reader.join(timeout=2)
+            writer.join(timeout=2)
+
+        self.assertFalse(reader.is_alive())
+        self.assertFalse(writer.is_alive())
+        with open(path, "r", encoding="utf-8") as handle:
+            self.assertEqual(json.load(handle), [{"name": "New"}])
+        with open(path + ".corrupt", "r", encoding="utf-8") as handle:
+            self.assertEqual(handle.read(), "not json")
 
 
 if __name__ == "__main__":

@@ -18,13 +18,15 @@ echo "=================================================="
 echo ""
 
 # ── 1. Venv (requires Python 3.10+ for pymobiledevice3) ──
-# Find best available Python: prefer 3.13 from Homebrew, then 3.12, 3.11, 3.10
+# Find best available Python: prefer versioned commands, then plain python3.
 PYTHON=""
-for p in /opt/homebrew/bin/python3.13 /opt/homebrew/bin/python3.12 /opt/homebrew/bin/python3.11 /opt/homebrew/bin/python3.10 python3.13 python3.12 python3.11 python3.10; do
+for p in /opt/homebrew/bin/python3.13 /opt/homebrew/bin/python3.12 /opt/homebrew/bin/python3.11 /opt/homebrew/bin/python3.10 python3.13 python3.12 python3.11 python3.10 python3; do
     if command -v "$p" &>/dev/null; then
-        PYVER=$("$p" -c "import sys; print(sys.version_info.minor)")
-        if [ "$PYVER" -ge 10 ] 2>/dev/null; then
-            PYTHON="$p"
+        CANDIDATE="$(command -v "$p")"
+        if "$CANDIDATE" -c \
+                'import sys; raise SystemExit(sys.version_info < (3, 10))' \
+                &>/dev/null; then
+            PYTHON="$CANDIDATE"
             break
         fi
     fi
@@ -51,11 +53,10 @@ else
 fi
 
 VPYTHON="$VENV_DIR/bin/python3"
-VPIP="$VENV_DIR/bin/pip"
 
 # ── 2. Dependencies ─────────────────────────────────────
 echo "[2/5] Installing dependencies..."
-"$VPIP" install --no-cache-dir -q -r requirements.txt pyinstaller
+"$VPYTHON" -m pip install --no-cache-dir -q -r requirements.txt pyinstaller
 echo "      Done"
 
 # ── 3. Clean ─────────────────────────────────────────────
@@ -139,7 +140,7 @@ cat > "$APP_DIR/Contents/Info.plist" << PLIST
     <key>CFBundleExecutable</key>
     <string>$APP_NAME</string>
     <key>LSMinimumSystemVersion</key>
-    <string>10.15</string>
+    <string>11.0</string>
     <key>CFBundleIconFile</key>
     <string>icon.icns</string>
     <key>NSHighResolutionCapable</key>

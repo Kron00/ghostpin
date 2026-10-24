@@ -5,13 +5,13 @@ import os
 import platform
 import random
 import shutil
+import tempfile
 import threading
 import time
 import uuid
 import xml.etree.ElementTree as ET
 from datetime import datetime
 
-import requests as http_requests
 
 
 # ── Cooldown table (Pokemon Go style) ─────────────────────────
@@ -129,12 +129,55 @@ SAVED_FILE = os.path.join(DATA_DIR, "saved_locations.json")
 PROFILES_FILE = os.path.join(DATA_DIR, "profiles.json")
 SCHEDULES_FILE = os.path.join(DATA_DIR, "schedules.json")
 ROUTES_FILE = os.path.join(DATA_DIR, "routes.json")
+_JSON_FILE_LOCK = threading.RLock()
+
+
+def _read_json_list(path):
+    with _JSON_FILE_LOCK:
+        if not os.path.exists(path):
+            return []
+        try:
+            with open(path, "r") as f:
+                return json.load(f)
+        except json.JSONDecodeError as exc:
+            corrupt_path = path + ".corrupt"
+            try:
+                os.replace(path, corrupt_path)
+            except FileNotFoundError:
+                return []
+            print(f"[!] Preserved corrupt JSON as {corrupt_path}: {exc}")
+            return []
+        except IOError:
+            return []
+
+
+def _atomic_write_json(path, data):
+    with _JSON_FILE_LOCK:
+        directory = os.path.dirname(path) or "."
+        temporary_path = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                    "w", dir=directory, prefix=os.path.basename(path) + ".",
+                    suffix=".tmp", delete=False) as f:
+                temporary_path = f.name
+                json.dump(data, f, indent=2)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(temporary_path, path)
+        except BaseException:
+            if temporary_path:
+                try:
+                    os.unlink(temporary_path)
+                except FileNotFoundError:
+                    pass
+            raise
 
 
 class LocationService:
     def __init__(self, simulator, bridge):
         self.simulator = simulator
         self.bridge = bridge
+        self._device_udid = None
         self.current_location = None
         self._keepalive_active = False
         self._keepalive_thread = None
@@ -196,10 +239,10 @@ class LocationService:
         self._joystick_thread = None
         self._joystick_direction = None
         self._joystick_speed = 5
+        self._movement_error = None
 
         # Cooldown state
         self._last_teleport_time = None
-        self._last_teleport_coords = None
         self._cooldown_end = 0
         self._last_known_position = None
 
@@ -210,10 +253,34 @@ class LocationService:
         self._wander_radius = 0
         self._wander_speed = 5
 
-    def attach_device(self, simulator, bridge):
+    def attach_device(self, simulator, bridge, udid=None):
         """Attach the current device transport without replacing saved state."""
+        previous_udid = self._device_udid
         self.simulator = simulator
         self.bridge = bridge
+        if simulator is None or bridge is None:
+            return {"location_retained": bool(self.current_location)}
+
+        next_udid = udid if udid is not None else previous_udid
+        self._device_udid = next_udid
+        if previous_udid is not None and next_udid != previous_udid:
+            self.current_location = None
+            self._route_fix_snapshot = None
+            self._last_known_position = None
+            self._last_teleport_time = None
+            self._cooldown_end = 0
+            return {"location_retained": False}
+        if previous_udid is not None and self.current_location:
+            try:
+                self._sim_set(self.current_location["lat"], self.current_location["lon"])
+            except Exception as exc:
+                print(f"[!] Could not restore cached location after reconnect: {exc}")
+                self.current_location = None
+                self._route_fix_snapshot = None
+                return {"location_retained": False}
+            self._start_keepalive()
+            return {"location_retained": True}
+        return {"location_retained": False}
 
     # ── Core ───────────────────────────────────────────────
 
@@ -274,16 +341,25 @@ class LocationService:
         # is just as true of the first jump after a reset as of any other. Use
         # the last position we knew, which outlives clear_location.
         reference = self.current_location or self._last_known_position
+        cooldown = None
         if reference:
             dist = self._haversine(reference["lat"], reference["lon"], lat, lon) / 1000
-            self._cooldown_end = time.time() + self._calculate_cooldown(dist)
-        self._last_teleport_time = time.time()
-        self._last_teleport_coords = {"lat": lat, "lon": lon}
+            cooldown = self._calculate_cooldown(dist)
 
         self._stop_keepalive()
-        self._sim_set(lat, lon)
+        try:
+            self._sim_set(lat, lon)
+        except Exception:
+            if self.current_location:
+                self._start_keepalive()
+            raise
+        teleport_time = time.time()
+        if cooldown is not None:
+            self._cooldown_end = teleport_time + cooldown
+        self._last_teleport_time = teleport_time
         self.current_location = {"lat": lat, "lon": lon}
         self._last_known_position = {"lat": lat, "lon": lon}
+        self._movement_error = None
         self._start_keepalive()
         return {"status": "Location set", "lat": lat, "lon": lon}
 
@@ -293,17 +369,23 @@ class LocationService:
         self.stop_route()
         self.joystick_stop()
         self.stop_wander()
+        if self.current_location:
+            self._last_known_position = dict(self.current_location)
         self._stop_keepalive()
         # Deliberately keep _last_known_position: the next jump is still a jump
         # from where the phone was last pretending to be.
         # A failed device clear must remain visible and retryable. Do not tell
         # the caller that real GPS was restored when the transport rejected it.
-        if self.simulator is not None and self.bridge is not None:
-            self._sim_clear()
+        try:
+            if self.simulator is not None and self.bridge is not None:
+                self._sim_clear()
+        except Exception:
+            if self.current_location:
+                self._start_keepalive()
+            raise
         self.current_location = None
         self._cooldown_end = 0
         self._last_teleport_time = None
-        self._last_teleport_coords = None
         return {"status": "Location cleared"}
 
     # The fix and the moment it was accepted are stored as one tuple so a reader
@@ -322,7 +404,10 @@ class LocationService:
         snapshot = self._route_fix_snapshot
         if not include_route or location is None:
             return location
-        age = {"fix_age_ms": round(max(0.0, time.monotonic() - accepted_at) * 1000, 1)}
+        age = {
+            "fix_age_ms": round(max(0.0, time.monotonic() - accepted_at) * 1000, 1),
+            "error": self._movement_error,
+        }
         if snapshot is None:
             return {**location, **age}
         generation, accepted_location, plan, state = snapshot
@@ -367,12 +452,7 @@ class LocationService:
 
     def _start_keepalive(self):
         with self._keepalive_lock:
-            if (
-                self._keepalive_thread
-                and self._keepalive_thread.is_alive()
-                and self._keepalive_stop
-                and not self._keepalive_stop.is_set()
-            ):
+            if self._keepalive_thread and self._keepalive_thread.is_alive():
                 return
             stop_event = threading.Event()
             self._keepalive_active = True
@@ -392,7 +472,7 @@ class LocationService:
         if t and t.is_alive():
             t.join(timeout=3)
         with self._keepalive_lock:
-            if self._keepalive_thread is t:
+            if self._keepalive_thread is t and (not t or not t.is_alive()):
                 self._keepalive_thread = None
                 self._keepalive_stop = None
 
@@ -406,7 +486,7 @@ class LocationService:
                     # Reassert the exact pin. Adding artificial jitter here makes
                     # a stationary spoof visibly bounce in Maps, and on newer iOS
                     # can look like competing real/simulated location sources.
-                    self._sim_set(lat, lon)
+                    self._sim_set(lat, lon, timeout=2)
                     fail_count = 0
             except Exception as exc:
                 fail_count += 1
@@ -438,6 +518,7 @@ class LocationService:
             self.stop_wander()
         self._joystick_direction = direction
         self._joystick_speed = speed_kmh
+        self._movement_error = None
 
         if not self._joystick_active:
             self._stop_keepalive()
@@ -459,6 +540,9 @@ class LocationService:
 
     def _joystick_loop(self):
         north_speed = east_speed = 0.0
+        failures = 0
+        failed = False
+        owner = threading.current_thread()
         for elapsed in _movement_ticks(lambda: self._joystick_active and self.current_location):
             north, east = self._DIRECTIONS.get(self._joystick_direction, (0, 0))
             magnitude = math.hypot(north, east) or 1.0
@@ -479,8 +563,22 @@ class LocationService:
                 self._sim_set(lat, lon, timeout=6)
                 self.current_location = {"lat": lat, "lon": lon}
                 north_speed, east_speed = next_north, next_east
-            except Exception:
-                pass
+                failures = 0
+            except Exception as exc:
+                failures += 1
+                if failures >= 8:
+                    self._movement_error = (
+                        "Lost contact with the iPhone — joystick stopped. "
+                        "Check it is plugged in and unlocked."
+                    )
+                    print(f"[!] Joystick stopped: {exc}")
+                    self._joystick_active = False
+                    failed = True
+        if (failed and self.current_location
+                and (self._joystick_thread is None or self._joystick_thread is owner)
+                and not self._route_active and not self._joystick_active
+                and not self._wander_active):
+            self._start_keepalive()
 
     # ── Movement / Routes ──────────────────────────────────
 
@@ -527,30 +625,17 @@ class LocationService:
         if not EMIT_MIN_HZ <= emit_cap <= EMIT_MAX_HZ:
             raise ValueError("Emission rate cap must be between 1 and 20 Hz")
 
-        if coordinates is not None:
-            if not isinstance(coordinates, list) or not (2 <= len(coordinates) <= 20000):
+        if not isinstance(coordinates, list) or not (2 <= len(coordinates) <= 20000):
+            raise ValueError("Calculated route geometry is invalid")
+        normalized = []
+        for point in coordinates:
+            if not isinstance(point, (list, tuple)) or len(point) < 2:
                 raise ValueError("Calculated route geometry is invalid")
-            normalized = []
-            for point in coordinates:
-                if not isinstance(point, (list, tuple)) or len(point) < 2:
-                    raise ValueError("Calculated route geometry is invalid")
-                lon, lat = float(point[0]), float(point[1])
-                if not (-90 <= lat <= 90 and -180 <= lon <= 180):
-                    raise ValueError("Calculated route geometry is invalid")
-                normalized.append([lon, lat])
-            coordinates = normalized
-        else:
-            coords_str = ";".join(f"{wp['lng']},{wp['lat']}" for wp in waypoints)
-            url = f"https://router.project-osrm.org/route/v1/driving/{coords_str}?geometries=geojson&overview=full"
-
-            resp = http_requests.get(url, timeout=15)
-            data = resp.json()
-
-            if data.get("code") != "Ok" or not data.get("routes"):
-                raise ValueError(f"Routing failed: {data.get('message', 'No route found')}")
-
-            route = data["routes"][0]
-            coordinates = route["geometry"]["coordinates"]
+            lon, lat = float(point[0]), float(point[1])
+            if not (-90 <= lat <= 90 and -180 <= lon <= 180):
+                raise ValueError("Calculated route geometry is invalid")
+            normalized.append([lon, lat])
+        coordinates = normalized
 
         profile = None
         if speeds is not None:
@@ -618,6 +703,7 @@ class LocationService:
                 self._route_posted_limit_kmh = profile[0] if profile else None
                 self._route_holds = normalized_holds
                 self._route_error = None
+                self._movement_error = None
                 self._route_mode = mode
                 self._route_provider = provider
                 self._speed_randomize = randomize_speed
@@ -672,6 +758,7 @@ class LocationService:
         def append_point(point, origin):
             if points and self._haversine(
                     points[-1][1], points[-1][0], point[1], point[0]) < 0.001:
+                origins[-1] = origin
                 return
             points.append([point[0], point[1]])
             origins.append(origin)
@@ -1726,16 +1813,19 @@ class LocationService:
                               kind="waypoint")
             plan_key = "reverse" if plan_key == "forward" else "forward"
 
-        if finished_once:
-            self._route_progress = 100
-            self._route_remaining = 0
-            self._route_eta = 0
-        self._route_speed_current = 0
-        self._route_holding = False
-        self._route_hold_remaining = 0
-        self._route_active = False
-        if self.current_location:
-            self._start_keepalive()
+        with self._route_state_lock:
+            if generation != self._route_generation:
+                return
+            if finished_once:
+                self._route_progress = 100
+                self._route_remaining = 0
+                self._route_eta = 0
+            self._route_speed_current = 0
+            self._route_holding = False
+            self._route_hold_remaining = 0
+            self._route_active = False
+            if self.current_location:
+                self._start_keepalive()
 
     def pause_route(self):
         if not self._route_active:
@@ -1850,6 +1940,7 @@ class LocationService:
         self._wander_center = {"lat": lat, "lon": lon}
         self._wander_radius = radius_m
         self._wander_speed = speed_kmh
+        self._movement_error = None
         self._wander_active = True
         self.joystick_stop()
         self._stop_keepalive()
@@ -1869,6 +1960,9 @@ class LocationService:
         return {"status": "Wander stopped"}
 
     def _wander_loop(self):
+        failures = 0
+        failed = False
+        owner = threading.current_thread()
         while self._wander_active and self.current_location:
             # Pick a random point within radius
             angle = random.uniform(0, 2 * math.pi)
@@ -1897,13 +1991,27 @@ class LocationService:
                     self._sim_set(nlat, nlon, timeout=6)
                     self.current_location = {"lat": nlat, "lon": nlon}
                     speed = next_speed
-                except Exception:
-                    pass
+                    failures = 0
+                except Exception as exc:
+                    failures += 1
+                    if failures >= 8:
+                        self._movement_error = (
+                            "Lost contact with the iPhone — wander stopped. "
+                            "Check it is plugged in and unlocked."
+                        )
+                        print(f"[!] Wander stopped: {exc}")
+                        self._wander_active = False
+                        failed = True
 
             # Pause at the destination, while keeping Stop/Reset responsive.
             until = time.monotonic() + random.uniform(1, 4)
             while active() and time.monotonic() < until:
                 time.sleep(min(.05, max(0, until - time.monotonic())))
+        if (failed and self.current_location
+                and (self._wander_thread is None or self._wander_thread is owner)
+                and not self._route_active and not self._joystick_active
+                and not self._wander_active):
+            self._start_keepalive()
 
     def get_wander_status(self):
         return {
@@ -1911,6 +2019,7 @@ class LocationService:
             "center": self._wander_center,
             "radius": self._wander_radius,
             "speed_kmh": self._wander_speed,
+            "error": self._movement_error,
         }
 
     # ── GPX import / export ────────────────────────────────
@@ -2010,13 +2119,7 @@ class LocationService:
     # ── Profiles ───────────────────────────────────────────
 
     def get_profiles(self):
-        if not os.path.exists(PROFILES_FILE):
-            return []
-        try:
-            with open(PROFILES_FILE, "r") as f:
-                return json.load(f)
-        except (json.JSONDecodeError, IOError):
-            return []
+        return _read_json_list(PROFILES_FILE)
 
     def save_profile(self, name, data=None):
         """Save current state as a named profile."""
@@ -2043,8 +2146,7 @@ class LocationService:
                     break
             else:
                 profiles.append(profile)
-            with open(PROFILES_FILE, "w") as f:
-                json.dump(profiles, f, indent=2)
+            _atomic_write_json(PROFILES_FILE, profiles)
         return {"status": f"Profile '{name}' saved", "profile": profile}
 
     def load_profile(self, name):
@@ -2060,20 +2162,13 @@ class LocationService:
     def delete_profile(self, name):
         with self._file_lock:
             profiles = [p for p in self.get_profiles() if p["name"] != name]
-            with open(PROFILES_FILE, "w") as f:
-                json.dump(profiles, f, indent=2)
+            _atomic_write_json(PROFILES_FILE, profiles)
         return {"status": f"Profile '{name}' deleted"}
 
     # ── Schedules ──────────────────────────────────────────
 
     def get_schedules(self):
-        if not os.path.exists(SCHEDULES_FILE):
-            return []
-        try:
-            with open(SCHEDULES_FILE, "r") as f:
-                return json.load(f)
-        except (json.JSONDecodeError, IOError):
-            return []
+        return _read_json_list(SCHEDULES_FILE)
 
     def save_schedule(self, name, lat, lon, time_str, days=None):
         """Save a scheduled location. time_str is 'HH:MM', days is list like ['mon','tue']."""
@@ -2097,15 +2192,13 @@ class LocationService:
         with self._file_lock:
             schedules = self.get_schedules()
             schedules.append(schedule)
-            with open(SCHEDULES_FILE, "w") as f:
-                json.dump(schedules, f, indent=2)
+            _atomic_write_json(SCHEDULES_FILE, schedules)
         return {"status": "Schedule created", "schedule": schedule}
 
     def delete_schedule(self, schedule_id):
         with self._file_lock:
             schedules = [s for s in self.get_schedules() if s["id"] != schedule_id]
-            with open(SCHEDULES_FILE, "w") as f:
-                json.dump(schedules, f, indent=2)
+            _atomic_write_json(SCHEDULES_FILE, schedules)
         return {"status": "Schedule deleted"}
 
     def toggle_schedule(self, schedule_id, enabled):
@@ -2115,8 +2208,7 @@ class LocationService:
                 if s["id"] == schedule_id:
                     s["enabled"] = enabled
                     break
-            with open(SCHEDULES_FILE, "w") as f:
-                json.dump(schedules, f, indent=2)
+            _atomic_write_json(SCHEDULES_FILE, schedules)
         return {"status": "Schedule updated"}
 
     def check_schedules(self):
@@ -2141,13 +2233,7 @@ class LocationService:
     # ── Saved locations ────────────────────────────────────
 
     def get_saved(self):
-        if not os.path.exists(SAVED_FILE):
-            return []
-        try:
-            with open(SAVED_FILE, "r") as f:
-                data = json.load(f)
-        except (json.JSONDecodeError, IOError):
-            return []
+        data = _read_json_list(SAVED_FILE)
         # Ensure all items have a category field
         for loc in data:
             if "category" not in loc:
@@ -2168,15 +2254,13 @@ class LocationService:
                     break
             else:
                 locations.append({"name": name, "lat": lat, "lon": lon, "category": category})
-            with open(SAVED_FILE, "w") as f:
-                json.dump(locations, f, indent=2)
+            _atomic_write_json(SAVED_FILE, locations)
         return {"status": f"Saved '{name}'"}
 
     def delete_location(self, name):
         with self._file_lock:
             locations = [loc for loc in self.get_saved() if loc["name"] != name]
-            with open(SAVED_FILE, "w") as f:
-                json.dump(locations, f, indent=2)
+            _atomic_write_json(SAVED_FILE, locations)
         return {"status": f"Deleted '{name}'"}
 
     def get_categories(self):
@@ -2191,13 +2275,7 @@ class LocationService:
     def get_history(self):
         """Return location history from localStorage-compatible file."""
         hist_file = os.path.join(DATA_DIR, "history.json")
-        if not os.path.exists(hist_file):
-            return []
-        try:
-            with open(hist_file, "r") as f:
-                return json.load(f)
-        except (json.JSONDecodeError, IOError):
-            return []
+        return _read_json_list(hist_file)
 
     def add_to_history(self, lat, lon):
         hist_file = os.path.join(DATA_DIR, "history.json")
@@ -2209,26 +2287,18 @@ class LocationService:
                 "time": datetime.now().strftime("%Y-%m-%d %H:%M"),
             })
             history = history[:100]  # Keep last 100
-            with open(hist_file, "w") as f:
-                json.dump(history, f, indent=2)
+            _atomic_write_json(hist_file, history)
 
     def clear_history(self):
         hist_file = os.path.join(DATA_DIR, "history.json")
         with self._file_lock:
-            with open(hist_file, "w") as f:
-                json.dump([], f, indent=2)
+            _atomic_write_json(hist_file, [])
         return {"status": "History cleared"}
 
     # ── Route history ─────────────────────────────────
 
     def get_routes(self):
-        if not os.path.exists(ROUTES_FILE):
-            return []
-        try:
-            with open(ROUTES_FILE, "r") as f:
-                return json.load(f)
-        except (json.JSONDecodeError, IOError):
-            return []
+        return _read_json_list(ROUTES_FILE)
 
     def save_route(self, name, waypoints, speed, mode, distance):
         waypoints = self.validate_waypoints(waypoints)
@@ -2254,15 +2324,13 @@ class LocationService:
             routes = self.get_routes()
             routes.insert(0, route)
             routes = routes[:50]
-            with open(ROUTES_FILE, "w") as f:
-                json.dump(routes, f, indent=2)
+            _atomic_write_json(ROUTES_FILE, routes)
         return {"status": f"Route '{name}' saved", "route": route}
 
     def delete_route(self, route_id):
         with self._file_lock:
             routes = [r for r in self.get_routes() if r["id"] != route_id]
-            with open(ROUTES_FILE, "w") as f:
-                json.dump(routes, f, indent=2)
+            _atomic_write_json(ROUTES_FILE, routes)
         return {"status": "Route deleted"}
 
     # ── Helpers ────────────────────────────────────────────
@@ -2274,4 +2342,5 @@ class LocationService:
         dp = math.radians(lat2 - lat1)
         dl = math.radians(lon2 - lon1)
         a = math.sin(dp / 2) ** 2 + math.cos(p1) * math.cos(p2) * math.sin(dl / 2) ** 2
+        a = max(0.0, min(1.0, a))
         return R * 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))

@@ -7,10 +7,55 @@ function element() {
  const children = [], listeners = {};
  return {disabled:false,textContent:'',value:'',classList:{add:x=>classes.add(x),remove:x=>classes.delete(x),contains:x=>classes.has(x),toggle:(x,on)=>on?classes.add(x):classes.delete(x)},children, listeners, setAttribute(){},addEventListener:(name, fn)=>{listeners[name]=fn},querySelectorAll:()=>[],appendChild:child=>children.push(child),append:(...items)=>children.push(...items)};
 }
-const context = vm.createContext({console, URLSearchParams, AbortController, setTimeout,clearTimeout,setInterval,clearInterval, localStorage:{getItem:()=>null}, document:{createElement:()=>element(),addEventListener(){},getElementById:id=>{if(!elements.has(id))elements.set(id,element());return elements.get(id)},querySelectorAll:()=>[],querySelector:()=>null}, window:{},fetch:async()=>({ok:true,json:async()=>({})})});
+const context = vm.createContext({console, URLSearchParams, AbortController, setTimeout,clearTimeout,setInterval,clearInterval, localStorage:{getItem:key=>key==='coord_fmt'?'dms':null}, document:{createElement:()=>element(),addEventListener(){},getElementById:id=>{if(!elements.has(id))elements.set(id,element());return elements.get(id)},querySelectorAll:()=>[],querySelector:()=>null}, window:{},fetch:async()=>({ok:true,json:async()=>({})})});
 vm.runInContext(fs.readFileSync(require('node:path').join(__dirname, '../static/js/app.js'),'utf8'),context);
 vm.runInContext('var notices=[]; toast=(...args)=>notices.push(args);',context);
 (async()=>{
+ // DMS output is always valid input, including second/minute carry and west/south.
+ for(const [value,isLon,expected] of [
+  [40.999999,false,'41°0\'0.0"N'],
+  [-73.999999,true,'74°0\'0.0"W'],
+  [-12.345678,false,null],
+  [-73.9855,true,null],
+ ]) {
+  context.coordinate=value;context.coordinateIsLon=isLon;
+  const formatted=vm.runInContext('toDMS(coordinate,coordinateIsLon)',context);
+  if(expected)assert.equal(formatted,expected);
+  assert.doesNotMatch(formatted,/60\.0/);
+  context.formattedCoordinate=formatted;
+  const parsed=vm.runInContext('parseCoordinateValue(formattedCoordinate,coordinateIsLon)',context);
+  assert.ok(Math.abs(parsed-value)<=1/72000,`${formatted} parsed as ${parsed}`);
+ }
+ // One distance formatter follows the chosen units and never invents 1 m for zero.
+ vm.runInContext('speedUnit="kmh"',context);
+ assert.equal(vm.runInContext('formatDistance(0)',context),'');
+ assert.equal(vm.runInContext('formatDistance(0.15)',context),'150 m');
+ vm.runInContext('speedUnit="mph"',context);
+ assert.equal(vm.runInContext('formatDistance(0.15)',context),'492 ft');
+ assert.equal(vm.runInContext('formatDistance(2)',context),'1.2 mi');
+ vm.runInContext('speedUnit=null',context);
+ // Every action that consumes the coordinate fields must preserve DMS values.
+ let mutations=[];
+ context.fetch=async(url,options={})=>{if(options.body)mutations.push([url,JSON.parse(options.body)]);return{ok:true,json:async()=>({})}};
+ vm.runInContext('var realLoadProfiles=loadProfiles,realLoadSchedules=loadSchedules; cancelMovementUI=()=>{}; placeMarker=()=>{}; adoptDotAsRoamCentre=()=>{}; addToRecent=()=>{}; checkStealth=async()=>{}; loadSaved=async()=>{}; setPlacesTab=()=>{}; loadProfiles=async()=>{}; loadSchedules=async()=>{}; updateCoordInputs(40.758,-73.9855);',context);
+ await vm.runInContext('setLocation()',context);
+ vm.runInContext('$("save-name").value="Times Square"',context);
+ await vm.runInContext('confirmSaveLocation()',context);
+ vm.runInContext('$("profile-name").value="QA profile"',context);
+ await vm.runInContext('confirmSaveProfile()',context);
+ vm.runInContext('$("schedule-name").value="Morning";$("schedule-time").value="08:00"',context);
+ await vm.runInContext('confirmAddSchedule()',context);
+ for(const [,body] of mutations) {
+  assert.equal(body.lat,40.758);
+  assert.equal(body.lon,-73.9855);
+ }
+ vm.runInContext('adoptDotAsRoamCentre=()=>{}; roamCentre=null;',context);
+ const placed=vm.runInContext('placedLocation()',context);
+ assert.equal(placed.lat,40.758);assert.equal(placed.lon,-73.9855);
+ assert.equal(elements.get('lat-input').type,'text');
+ assert.equal(elements.get('lon-input').type,'text');
+ assert.equal(elements.get('btn-coord-fmt').textContent,'DMS');
+ vm.runInContext('coordFormat="dd"; applyCoordInputType(); loadProfiles=realLoadProfiles; loadSchedules=realLoadSchedules;',context);
  context.fetch=async()=>({ok:false,json:async()=>({error:'Device unavailable'})});
  await assert.rejects(vm.runInContext('requestMutation("/api/test")',context), /Device unavailable/);
  context.button=element(); context.reloaded=false;context.reload=()=>{context.reloaded=true};
@@ -34,6 +79,13 @@ vm.runInContext('var notices=[]; toast=(...args)=>notices.push(args);',context);
  vm.runInContext('_activeKeys.add("n"); pollPosition=async()=>{}; stopMovementTracking=()=>{};',context);
  await vm.runInContext('joystickStop()',context);
  assert.equal(vm.runInContext('_activeKeys.size',context),0);assert.equal(vm.runInContext('joystickDirection',context),null);
+ // Joystick and Undo preserve actionable backend errors.
+ context.fetch=async()=>({ok:false,json:async()=>({error:'No location set. Set a location first.'})});
+ await vm.runInContext('joystickMove("e")',context);
+ assert.equal(vm.runInContext('notices.at(-1)[0]',context),'No location set. Set a location first.');
+ vm.runInContext('previousLocation={lat:48.86,lon:2.34};',context);
+ await vm.runInContext('undoTeleport()',context);
+ assert.equal(vm.runInContext('notices.at(-1)[0]',context),'No location set. Set a location first.');
  // Loading a profile must restore its controls and actual simulated position.
  vm.runInContext('map={flyTo(){}}; placeMarker=()=>{}; adoptDotAsRoamCentre=()=>{}; updateStatusBar=()=>{};',context);
  const profile={name:'Museum',lat:48.86,lon:2.34,speed:42,route_mode:'loop'};
@@ -53,6 +105,12 @@ vm.runInContext('var notices=[]; toast=(...args)=>notices.push(args);',context);
  assert.equal(vm.runInContext('selectedSpeed',context),9);
  assert.equal(elements.get('route-mode').value,'pingpong');
  assert.equal(vm.runInContext('routeStops.length',context),2);
+ // Route calculation sends exact selected coordinates, not ambiguous labels.
+ let calculatedBody;
+ context.fetch=async(url,options)=>{calculatedBody=JSON.parse(options.body);return{ok:true,json:async()=>({})}};
+ vm.runInContext('routeStops=[{text:"Coordinates",place:{lat:40.758,lon:-73.9855}},{text:"Eiffel Tower",place:{lat:48.8584,lon:2.2945}}]; drawCalculatedRoute=()=>{}; renderCalculatedRouteStatus=()=>{};',context);
+ await vm.runInContext('calculateAddressRoute()',context);
+ assert.deepEqual(calculatedBody.stops,['40.758,-73.9855','48.8584,2.2945']);
  // Pausing a schedule sends an explicit false, and failures leave it retryable.
  context.schedule={id:'schedule-1',enabled:true}; context.button=element();
  let mutation;

@@ -1,8 +1,9 @@
 """Physical motion and emission regressions, independent of network or a phone."""
 import math
 import random
+import threading
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from location_service import (LocationService, MAX_ACCEL_MS2, MAX_DECEL_MS2,
                               EMIT_MAX_HZ, GPS_NOISE_MAX_DRIFT_MS)
@@ -26,6 +27,13 @@ class MotionQualityTests(unittest.TestCase):
         if plan['total_distance'] - state['distance'] > .02:
             self.assertLessEqual(speed - next_speed, MAX_DECEL_MS2 * dt + 1e-7)
         return state['distance'], next_speed
+
+    def test_haversine_accepts_exact_antipodal_coordinates(self):
+        distance = LocationService._haversine(
+            66.16849958870057, -136.09604216031624,
+            -66.16849958870057, 43.903957839683756,
+        )
+        self.assertAlmostEqual(distance, math.pi * 6371000, places=5)
 
     def test_speed_changes_preserve_position_and_ramp_in_both_directions(self):
         service = self.service(speed=30)
@@ -74,6 +82,15 @@ class MotionQualityTests(unittest.TestCase):
         self.assertLess(min(corner_speeds), 19)
         self.assertEqual(distance, plan['total_distance'])
 
+    def test_duplicate_geometry_keeps_the_following_segment_limit(self):
+        start = [2.2945, 48.8584]
+        service = self.service([start, start, [2.3045, 48.8584]],
+                               speed=100, limits=[100, 5])
+        plan = service._build_motion_plan()
+        self.assertTrue(plan['segment_caps'])
+        self.assertTrue(all(abs(cap * 3.6 - 5) < .001
+                            for cap in plan['segment_caps']))
+
     def test_one_latency_spike_does_not_permanently_halve_cadence(self):
         service = self.service()
         service._route_write_latencies = [.012] * 59 + [.4]
@@ -88,6 +105,42 @@ class MotionQualityTests(unittest.TestCase):
         service._route_write_attempts = 160
         service._update_route_emit_health()
         self.assertEqual(service._target_emit_hz(), EMIT_MAX_HZ)
+
+    def test_keepalive_stop_retains_a_still_running_thread(self):
+        service = self.service()
+        service.current_location = {'lat': 48.8584, 'lon': 2.2945}
+        thread = Mock()
+        thread.is_alive.return_value = True
+        stop = threading.Event()
+        service._keepalive_thread = thread
+        service._keepalive_stop = stop
+
+        service._stop_keepalive()
+
+        self.assertIs(service._keepalive_thread, thread)
+        self.assertIs(service._keepalive_stop, stop)
+        self.assertTrue(stop.is_set())
+        thread.join.assert_called_once_with(timeout=3)
+        with patch('location_service.threading.Thread') as thread_factory:
+            service._start_keepalive()
+        thread_factory.assert_not_called()
+
+    def test_keepalive_write_timeout_is_shorter_than_stop_join_budget(self):
+        service = self.service()
+        service.current_location = {'lat': 48.8584, 'lon': 2.2945}
+        stop = threading.Event()
+        timeouts = []
+
+        def write(lat, lon, timeout=None):
+            timeouts.append(timeout)
+            stop.set()
+
+        with patch.object(service, '_sim_set', side_effect=write):
+            service._keepalive_loop(stop)
+
+        self.assertEqual(len(timeouts), 1)
+        self.assertIsNotNone(timeouts[0])
+        self.assertLess(timeouts[0], 3)
 
     def test_noise_drifts_continuously_instead_of_jumping_each_fix(self):
         service = self.service()
@@ -163,6 +216,68 @@ class MotionQualityTests(unittest.TestCase):
             measured = service._haversine(a[1], a[2], b[1], b[2]) / (b[0] - a[0]) * 3.6
             self.assertAlmostEqual(measured, 5, delta=.02)
 
+    def test_joystick_stops_and_reports_eight_consecutive_write_failures(self):
+        service = self.service()
+        service.current_location = {'lat': 48.8584, 'lon': 2.2945}
+        service._joystick_active = True
+        service._joystick_direction = 'n'
+
+        with patch('location_service._movement_ticks', return_value=iter([.05] * 8)), \
+                patch.object(service, '_sim_set', side_effect=RuntimeError('offline')), \
+                patch.object(service, '_start_keepalive') as keepalive:
+            service._joystick_loop()
+
+        self.assertFalse(service._joystick_active)
+        self.assertIn('joystick stopped', service.get_current(include_route=True)['error'])
+        keepalive.assert_called_once_with()
+
+    def test_failed_joystick_does_not_take_keepalive_from_a_new_route(self):
+        service = self.service()
+        service.current_location = {'lat': 48.8584, 'lon': 2.2945}
+        service._joystick_active = True
+        service._joystick_direction = 'n'
+        failures = []
+
+        def fail_write(*args, **kwargs):
+            failures.append(1)
+            if len(failures) == 8:
+                service._route_active = True
+            raise RuntimeError('offline')
+
+        with patch('location_service._movement_ticks', return_value=iter([.05] * 8)), \
+                patch.object(service, '_sim_set', side_effect=fail_write), \
+                patch.object(service, '_start_keepalive') as keepalive:
+            service._joystick_loop()
+
+        keepalive.assert_not_called()
+
+    def test_wander_stops_and_reports_eight_consecutive_write_failures(self):
+        service = self.service()
+        service.current_location = {'lat': 48.8584, 'lon': 2.2945}
+        service._wander_center = dict(service.current_location)
+        service._wander_radius = 100
+        service._wander_active = True
+        calls = []
+
+        def fail_write(*args, **kwargs):
+            calls.append(1)
+            if len(calls) > 8:
+                service._wander_active = False
+            raise RuntimeError('offline')
+
+        with patch('location_service._movement_ticks',
+                   side_effect=lambda active: iter([.05] * 8)), \
+                patch('location_service.random.uniform', return_value=.5), \
+                patch.object(service, '_sim_set', side_effect=fail_write), \
+                patch.object(service, '_start_keepalive') as keepalive:
+            service._wander_loop()
+
+        self.assertEqual(len(calls), 8)
+        status = service.get_wander_status()
+        self.assertFalse(status['active'])
+        self.assertIn('wander stopped', status['error'])
+        keepalive.assert_called_once_with()
+
     def test_signal_stop_is_exact_and_can_pull_away_again(self):
         coordinates = [[2.2945, 48.8584], [2.2955, 48.8584], [2.2965, 48.8584]]
         service = self.service(coordinates, speed=30)
@@ -207,6 +322,30 @@ class MotionQualityTests(unittest.TestCase):
             seam = len(writes)
             self.assertTrue(service._drive_route_pass('cycle', 1))
         self.assertTrue(all(abs(v - 5) < .001 for v in writes[seam-5:seam+5]))
+
+    def test_late_route_cleanup_cannot_stop_a_newer_generation(self):
+        service = self.service()
+        service.current_location = {'lat': 48.8584, 'lon': 2.2945}
+        service._route_active = True
+        service._route_generation = 1
+
+        def old_pass_finishes_late(*args):
+            service._route_generation = 2
+            service._route_active = True
+            service._route_speed_current = 12
+            service._route_holding = True
+            service._route_hold_remaining = 4
+            return False
+
+        with patch.object(service, '_drive_route_pass', side_effect=old_pass_finishes_late), \
+                patch.object(service, '_start_keepalive') as keepalive:
+            service._route_loop(1)
+
+        self.assertTrue(service._route_active)
+        self.assertEqual(service._route_speed_current, 12)
+        self.assertTrue(service._route_holding)
+        self.assertEqual(service._route_hold_remaining, 4)
+        keepalive.assert_not_called()
 
     def test_preview_uses_accepted_progress_at_repeated_intersections(self):
         service = self.service([[2.2945, 48.8584], [2.2985, 48.8584],

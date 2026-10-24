@@ -457,3 +457,6 @@ class DeviceManager:
     def shutdown(self):
         self._auto_reconnect = False
         self.disconnect()
+        from tunnel_service import stop_owned_tunnel
+
+        stop_owned_tunnel()

@@ -2,23 +2,101 @@ const vm = require('node:vm');
 const fs = require('node:fs');
 const assert = require('node:assert/strict');
 const elements = new Map();
+const storage = new Map();
 let clock = 0;
 function element() {
  const classes = new Set();
  return {disabled:false,textContent:'',value:'',checked:false,style:{},classList:{add:x=>classes.add(x),remove:x=>classes.delete(x),contains:x=>classes.has(x),toggle:(x,on)=>on?classes.add(x):classes.delete(x)},setAttribute(){},addEventListener(){},querySelectorAll:()=>[]};
 }
 const context = vm.createContext({console,AbortController,setTimeout,clearTimeout,
- setInterval:()=>1,clearInterval(){},localStorage:{getItem:()=>null},
+ setInterval:()=>1,clearInterval(){},localStorage:{getItem:key=>storage.get(key)??null,setItem:(key,value)=>storage.set(key,String(value))},
  requestAnimationFrame:()=>1,cancelAnimationFrame(){},performance:{now:()=>clock},
  document:{addEventListener(){},getElementById:id=>{if(!elements.has(id))elements.set(id,element());return elements.get(id)},querySelectorAll:()=>[],querySelector:()=>null},window:{}});
 vm.runInContext(fs.readFileSync(require('node:path').join(__dirname,'../static/js/app.js'),'utf8'), context);
 const run=code=>vm.runInContext(code,context);
 run('toast=()=>{}; map={removeLayer(){},stop(){},setView(){}}; renderRoamArea=()=>{}; updateStatusBar=()=>{}; checkStealth=async()=>{}; renderReadout=()=>{}; drawRoamPath=()=>{};');
-run('$("roam-radius").value="1"; roamCentre={lat:48.86,lon:2.30};');
+run('$("roam-radius").value="1"; roamCentre={lat:48.86,lon:2.30}; currentDeviceInfo={connected:true};');
 const chunk={waypoints:[{lat:48.86,lng:2.30},{lat:48.861,lng:2.301}],coordinates:[[2.30,48.86],[2.301,48.861]],distance_km:0.15};
 const ok=data=>({ok:true,json:async()=>data});
 const tick=()=>new Promise(resolve=>setImmediate(resolve));
 (async()=>{
+ // A Realistic start that cannot load posted limits must stay visibly honest.
+ run('var notices=[]; var realPollPosition=pollPosition,realStartMovementTracking=startMovementTracking; toast=(...args)=>notices.push(args); adaptiveSpeed=true; routePoints=[{lat:48.86,lng:2.30},{lat:48.87,lng:2.31}]; calculatedRouteSummary={distanceKm:1,googleEtaMin:2,routeName:""}; $("adaptive-note"); $("btn-route-start").disabled=false; pollPosition=async()=>{}; startMovementTracking=()=>{};');
+ context.fetch=async()=>ok({distance_km:1,adaptive:false});
+ await run('startRoute()');
+ assert.match(elements.get('adaptive-note').textContent,/posted limits are unavailable/i);
+ assert.match(elements.get('adaptive-note').textContent,/flat/i);
+ assert.doesNotMatch(elements.get('route-address-status').textContent,/follows posted limits/i);
+ assert.equal(run('notices.some(n=>n[1]==="warning" && /posted limits are unavailable/i.test(n[0]))'),true);
+ run('cancelMovementUI(); calculatedRouteSummary=null; adaptiveSpeed=false; updateAdaptiveUI(); notices=[]; pollPosition=realPollPosition; startMovementTracking=realStartMovementTracking;');
+ // Reload reconciliation restores an active paused roam and its live controls.
+ let trackingStarts=0;
+ context.localStorage.setItem('roam_radius','2.5');
+ context.localStorage.setItem('roam_unit','km');
+ run('adaptiveSpeed=true; roamCentre=null; activeSpoofLocation=null; followMode=false; $("follow-mode").checked=false; $("route-mode").value="once"; $("roam-radius").value="1"; startMovementTracking=()=>trackingStarts++;');
+ context.trackingStarts=trackingStarts;
+ context.fetch=async url=>{
+  if(url==='/api/route/status')return ok({active:true,paused:true,provider:'roam',mode:'loop',adaptive:false,target_speed_kmh:48,distance_km:2,progress_pct:25});
+  if(url==='/api/location/current')return ok({lat:48.87,lon:2.31});
+  return ok({});
+ };
+ await run('reconcileRouteStatus()');
+ assert.equal(elements.get('btn-route-stop').disabled,false);
+ assert.equal(elements.get('btn-route-pause').classList.contains('hidden'),true);
+ assert.equal(elements.get('btn-route-resume').classList.contains('hidden'),false);
+ assert.equal(elements.get('btn-roam-stop').disabled,false);
+ assert.notEqual(run('routePolling'),null);
+ assert.equal(run('trackingStarts'),1);
+ assert.match(elements.get('adaptive-note').textContent,/posted limits are unavailable/i);
+ assert.equal(run('followMode'),true);assert.equal(elements.get('follow-mode').checked,true);
+ assert.equal(elements.get('route-mode').value,'loop');
+ assert.deepEqual(JSON.parse(run('JSON.stringify(roamCentre)')),{lat:48.87,lon:2.31});
+ assert.equal(elements.get('roam-radius').value,'2.5');
+ run('cancelMovementUI(); adaptiveSpeed=false; adaptiveFallbackSpeedKmh=null; updateAdaptiveUI(); startMovementTracking=realStartMovementTracking;');
+ // A silent continuation without its session parameters stops cleanly.
+ let invalidRoamStops=0;
+ run('roamActive=true; roamCentre=null; $("roam-radius").value="";');
+ context.fetch=async url=>{if(url==='/api/route/stop')invalidRoamStops++;return ok({});};
+ await run('startRoaming(true)');
+ assert.equal(run('roamActive'),false);assert.equal(run('routePolling'),null);
+ assert.equal(invalidRoamStops,1);assert.equal(elements.get('btn-roam-stop').disabled,true);
+ run('$("roam-radius").value="1"; roamCentre={lat:48.86,lon:2.30};');
+ // Roam rejects before road preparation when no device is ready.
+ let noDeviceFetches=0;
+ run('currentDeviceInfo=null; notices=[]; updateRoamUI();');
+ assert.equal(elements.get('btn-roam-start').disabled,true);
+ context.fetch=async()=>{noDeviceFetches++;return ok({})};
+ await run('startRoaming()');
+ assert.equal(noDeviceFetches,0);
+ assert.match(run('notices.at(-1)[0]'),/No iPhone is ready/);
+ run('currentDeviceInfo={connected:true}; updateRoamUI();');
+ // Roam start uses the shared formatter instead of hard-coded kilometres.
+ run('speedUnit="mph"; notices=[];');
+ context.fetch=async url=>ok(url==='/api/roam/route'?chunk:{});
+ await run('startRoaming()');
+ assert.equal(run('notices.some(n=>/Roaming 492 ft of roads/.test(n[0]))'),true);
+ assert.equal(context.localStorage.getItem('roam_radius'),'1');
+ run('cancelMovementUI(); speedUnit=null;');
+ // A late prefetch from chunk A cannot survive after fallback chunk B starts.
+ let roamRouteCalls=0,resolveStalePrefetch;
+ const nextChunk={...chunk,waypoints:[{lat:48.861,lng:2.301},{lat:48.862,lng:2.302}],coordinates:[[2.301,48.861],[2.302,48.862]]};
+ context.fetch=async url=>{
+  if(url==='/api/roam/route') {
+   roamRouteCalls++;
+   if(roamRouteCalls===1)return ok(chunk);
+   if(roamRouteCalls===2)return new Promise(resolve=>{resolveStalePrefetch=resolve});
+   return ok(nextChunk);
+  }
+  if(url==='/api/location/current')return ok({lat:48.861,lon:2.301});
+  return ok({});
+ };
+ await run('startRoaming()');
+ run('roamChunkCoords=[[2.30,48.86],[2.301,48.861]];');
+ run('prefetchNextRoamChunk()');await tick();
+ await run('continueRoaming()');
+ resolveStalePrefetch(ok(chunk));await tick();await tick();
+ assert.equal(run('roamPrefetch'),null);
+ run('cancelMovementUI();');
  // Start lookup immediately while the previous route stops, but do not move
  // until both finish. The old serialized flow fails the first assertion.
  let finishStop, finishLookup; let parallelStarts=0;
@@ -124,6 +202,63 @@ const tick=()=>new Promise(resolve=>setImmediate(resolve));
  resolvePosition(ok({lat:48.86,lon:2.30}));await poll;
  assert.equal(run('roamActive'),false);assert.equal(run('activeSpoofLocation'),null);
  assert.equal(run('routePolling'),null);
+ // Background position sync treats the backend's explicit 404 as a clear.
+ run('marker={}; activeSpoofLocation={lat:48.86,lon:2.30}; $("lat-input").value="48.86"; $("lon-input").value="2.30";');
+ context.fetch=async()=>({ok:false,status:404,json:async()=>({error:'No location set'})});
+ await run('pollPosition()');
+ assert.equal(run('activeSpoofLocation'),null);assert.equal(run('marker'),null);
+ assert.equal(elements.get('lat-input').value,'');assert.equal(elements.get('lon-input').value,'');
+ // With no spoof active, the same 404 leaves a picked-but-not-warped marker alone.
+ run('marker={}; $("lat-input").value="48.85";');
+ await run('pollPosition()');
+ assert.notEqual(run('marker'),null);assert.equal(elements.get('lat-input').value,'48.85');
+ // Connect applies location_retained:false immediately, but only to a real spoof.
+ let removedSpoofMarkers=0;
+ run('map.removeLayer=()=>removedSpoofMarkers++; marker={setLatLng(){}}; activeSpoofLocation={lat:48.86,lon:2.30}; motionSamples=[{lat:48.86,lon:2.30,t:1}]; $("lat-input").value="48.86"; $("lon-input").value="2.30"; connectionPending=false;');
+ context.removedSpoofMarkers=removedSpoofMarkers;
+ context.fetch=async url=>url==='/api/device/connect'
+  ?ok({connection_type:'USB',tunnel_mode:'userspace',location_retained:false})
+  :ok({connected:true,developer_mode:true,ddi_mounted:true,tunnel_mode:'userspace'});
+ await run('connectDevice()');await tick();
+ assert.equal(run('activeSpoofLocation'),null);assert.equal(run('marker'),null);
+ assert.equal(elements.get('lat-input').value,'');assert.equal(run('motionSamples.length'),0);
+ run('marker={picked:true,setLatLng(){}}; activeSpoofLocation=null; $("lat-input").value="48.85"; connectionPending=false;');
+ await run('connectDevice()');await tick();
+ assert.equal(run('marker.picked'),true);assert.equal(elements.get('lat-input').value,'48.85');
+ // An unchanged spoof does not drag a freshly picked marker back to it.
+ run('var placed=0, realPlace=placeMarker; placeMarker=()=>placed++; activeSpoofLocation={lat:48.86,lon:2.30}; movementPolling=null;');
+ context.fetch=async()=>ok({lat:48.86,lon:2.30});
+ await run('pollPosition()');
+ assert.equal(run('placed'),0);
+ run('placeMarker=realPlace;');
+ // A joystick the backend gave up on is released with the backend's reason.
+ run('var notes=[]; toast=(m,k)=>notes.push([m,k]); joystickDirection="n";');
+ context.fetch=async()=>ok({lat:48.86,lon:2.30,error:'Lost contact with the iPhone'});
+ await run('pollPosition()');
+ assert.equal(run('joystickDirection'),null);assert.equal(run('JSON.stringify(notes.at(-1))'),JSON.stringify(['Lost contact with the iPhone','error']));
+ // Device readiness polling releases a held joystick even though position polling stops.
+ const heldJoystick=element();heldJoystick.classList.add('active');
+ context.document.querySelectorAll=()=>[heldJoystick];
+ run('joystickDirection="n"; _activeKeys.add("ArrowUp"); _autoConnectAttempted=true;');
+ context.fetch=async()=>ok({connected:false});
+ await run('pollDevice()');
+ assert.equal(run('joystickDirection'),null);assert.equal(run('_activeKeys.size'),0);
+ assert.equal(heldJoystick.classList.contains('active'),false);
+ context.document.querySelectorAll=()=>[];
+ run('toast=()=>{}; marker=null; activeSpoofLocation={lat:48.86,lon:2.30};');
+ // Roam recovery reconnects the phone that was roaming, not the first one discovered.
+ const connectBodies=[];
+ context.fetch=async(url,options)=>{if(url==='/api/device/connect'){connectBodies.push(JSON.parse(options.body));return {ok:false,json:async()=>({})};}return ok({});};
+ run('roamActive=true; roamRecoveryInProgress=false; currentDeviceInfo={connected:false,udid:"PHONE-B",connection_type:"USB"};');
+ await run('recoverRoamingAfterDeviceError("Lost the iPhone.")');
+ assert.equal(connectBodies[0].udid,'PHONE-B');
+ run('roamActive=false; roamRecoveryInProgress=false; currentDeviceInfo={connected:true};');
+ // A scheduled/external move refreshes consistency once, but motion polls do not.
+ run('var realPlaceMarker=placeMarker,realCheckStealth=checkStealth; var checkCalls=0; placeMarker=(lat,lon)=>updateCoordInputs(lat,lon); checkStealth=async()=>checkCalls++; activeSpoofLocation={lat:48.86,lon:2.30}; movementPolling=null; followMode=false;');
+ context.fetch=async()=>ok({lat:48.87,lon:2.31});
+ await run('pollPosition()');await run('pollPosition()');
+ assert.equal(run('checkCalls'),1);
+ run('placeMarker=realPlaceMarker; checkStealth=realCheckStealth;');
  // A prefetch from an old session cannot be attached to the new session.
  let resolvePrefetch;
  run('roamActive=true; roamChunkCoords=[[2.30,48.86],[2.301,48.861]];');

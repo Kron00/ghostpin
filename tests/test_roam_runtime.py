@@ -8,6 +8,27 @@ import app
 
 
 class RoadLookupTests(unittest.TestCase):
+    def test_initial_walk_projects_onto_nearest_edge_and_obeys_one_way(self):
+        graph = {
+            'edges': [{
+                'a': 1, 'b': 2, 'ids': [1, 2],
+                'points': [(0.0, 0.0), (0.01, 0.0)],
+                'speed': 30, 'forward': True, 'backward': False,
+            }],
+            'adjacency': {1: {0}, 2: {0}},
+            'outgoing': {1: {0}},
+            'allowed_steps': {(0, 1, 2)},
+            'junction_kinds': {}, 'identity': ['test'],
+        }
+
+        route = app._random_walk(graph, 0.0, 0.005, 0.1)
+
+        self.assertIsNotNone(route)
+        self.assertAlmostEqual(route['coordinates'][0][0], 0.005, places=7)
+        self.assertAlmostEqual(route['coordinates'][0][1], 0.0, places=7)
+        self.assertEqual(route['coordinates'][-1], [0.01, 0.0])
+        self.assertEqual(route['speeds'], [30])
+
     def test_stalled_primary_does_not_block_healthy_mirror(self):
         release = threading.Event()
         success = Mock()
@@ -187,6 +208,26 @@ class RoadCacheTests(unittest.TestCase):
         self.assertIn((0, 0, 1), graph['allowed_steps'])
         self.assertNotIn((0, 1, 0), graph['allowed_steps'])
         self.assertEqual(graph['junction_kinds'], {1: 'signal'})
+
+    def test_motor_vehicle_access_controls_road_graph_admission(self):
+        def build(extra_tags):
+            elements = [
+                {**element, 'tags': {**element['tags'], **extra_tags}}
+                for element in self.elements
+            ]
+            with patch.object(app, '_overpass_elements', return_value=elements), patch.object(
+                    app, '_save_road_elements'):
+                return app._build_road_graph(*self.key, self.key)
+
+        for key in ('motorcar', 'motor_vehicle', 'vehicle', 'access'):
+            for value in ('no', 'private'):
+                with self.subTest(key=key, value=value):
+                    self.assertIsNone(build({key: value}))
+        for value in ('destination', 'permissive', 'yes'):
+            with self.subTest(value=value):
+                self.assertIsNotNone(build({'access': value}))
+        self.assertIsNotNone(build({'motorcar': 'yes', 'access': 'no'}))
+        self.assertIsNone(build({'motor_vehicle': 'private', 'access': 'yes'}))
 
     def test_memory_cache_keeps_original_disk_expiry(self):
         import os

@@ -4,6 +4,7 @@ from unittest.mock import AsyncMock, Mock, patch
 
 import app as app_module
 from device_manager import DeviceManager, DvtProvider
+from location_service import LocationService
 from main_app import start_backend
 from transport_tunnel import TransportTunnel, upstream
 from updater import check_release
@@ -70,6 +71,82 @@ class ConnectionTests(unittest.TestCase):
         service.stop_wander.assert_called_once()
         service.joystick_stop.assert_called_once()
         service.attach_device.assert_called_once_with(None, None)
+
+    def test_switch_passes_identity_and_clears_a_fix_from_another_phone(self):
+        simulator, bridge = Mock(), Mock()
+        manager = Mock()
+        manager.device_info = {'connected': True, 'udid': 'phone-a'}
+        manager.simulator, manager.bridge = simulator, bridge
+        manager.reconnect.return_value = {'connected': True, 'udid': 'phone-b'}
+        service = LocationService(None, None)
+        service.attach_device(Mock(), Mock(), 'phone-a')
+        service.current_location = {'lat': 1, 'lon': 2}
+        service._last_known_position = {'lat': 1, 'lon': 2}
+        service._last_teleport_time = 100
+        service._cooldown_end = 200
+
+        with patch.object(app_module, 'device_mgr', manager), \
+                patch.object(app_module, 'loc_svc', service), \
+                patch.object(app_module, '_start_schedule_checker'), \
+                patch.object(service, 'stop_route'), \
+                patch.object(service, 'stop_wander'), \
+                patch.object(service, 'joystick_stop'), \
+                patch.object(service, '_stop_keepalive'):
+            response = app_module.app.test_client().post('/api/device/switch', json={})
+
+        self.assertEqual(response.status_code, 200)
+        self.assertFalse(response.json['location_retained'])
+        self.assertIsNone(service.current_location)
+        self.assertIsNone(service._last_known_position)
+        self.assertEqual(service.get_cooldown(), {
+            'active': False,
+            'remaining_seconds': 0,
+            'total_seconds': 0,
+            'last_teleport': None,
+        })
+
+    def test_same_phone_reconnect_reapplies_the_fix_and_restarts_keepalive(self):
+        service = LocationService(None, None)
+        service.attach_device(Mock(), Mock(), 'phone-a')
+        service.current_location = {'lat': 1, 'lon': 2}
+
+        with patch.object(service, '_sim_set') as write, \
+                patch.object(service, '_start_keepalive') as keepalive:
+            result = service.attach_device(Mock(), Mock(), 'phone-a')
+
+        self.assertTrue(result['location_retained'])
+        write.assert_called_once_with(1, 2)
+        keepalive.assert_called_once_with()
+
+    def test_same_phone_reconnect_keeps_new_transport_when_fix_replay_fails(self):
+        simulator, bridge = Mock(), Mock()
+        manager = Mock()
+        manager.device_info = {'connected': True, 'udid': 'phone-a'}
+        manager.simulator, manager.bridge = simulator, bridge
+        manager.reconnect.return_value = {
+            'connected': True, 'udid': 'phone-a', 'connection_type': 'USB'
+        }
+        service = LocationService(None, None)
+        service.attach_device(Mock(), Mock(), 'phone-a')
+        service.current_location = {'lat': 1, 'lon': 2}
+
+        with patch.object(app_module, 'device_mgr', manager), \
+                patch.object(app_module, 'loc_svc', service), \
+                patch.object(app_module, '_start_schedule_checker'), \
+                patch.object(service, 'stop_route'), \
+                patch.object(service, 'stop_wander'), \
+                patch.object(service, 'joystick_stop'), \
+                patch.object(service, '_stop_keepalive'), \
+                patch.object(service, '_sim_set', side_effect=RuntimeError('replay failed')), \
+                patch('builtins.print') as log:
+            response = app_module.app.test_client().post('/api/device/connect', json={})
+
+        self.assertEqual(response.status_code, 200, response.data)
+        self.assertFalse(response.json['location_retained'])
+        self.assertIs(service.simulator, simulator)
+        self.assertIs(service.bridge, bridge)
+        self.assertIsNone(service.current_location)
+        self.assertIn('replay failed', log.call_args.args[0])
 
     def test_native_server_starts_without_connecting_phone(self):
         old_origins = app_module._ALLOWED_ORIGINS

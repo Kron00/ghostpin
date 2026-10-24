@@ -46,7 +46,7 @@ remain active until reset or the developer connection ends.
 
 ## Requirements
 
-- macOS 10.15 or newer
+- macOS 11.0 or newer on Apple silicon
 - Python 3.10 or newer, only if running from source — Homebrew Python 3.12 or
   3.13 recommended
 - An iPhone running iOS 17 or newer with Developer Mode enabled

@@ -134,6 +134,7 @@ class MovementFlowTests(unittest.TestCase):
 
     def test_stop_during_osrm_lookup_cancels_late_start(self):
         from unittest.mock import Mock
+        import app as app_module
         response = Mock()
         response.json.return_value = {'code': 'Ok', 'routes': [{'geometry': {
             'coordinates': [[2.2945, 48.8584], [2.2945, 48.8585]]}}]}
@@ -142,10 +143,11 @@ class MovementFlowTests(unittest.TestCase):
             self.service.stop_route()
             return response
 
-        with patch.object(location_service.http_requests, 'get', delayed_lookup):
-            with self.assertRaisesRegex(ValueError, 'cancelled'):
-                self.service.start_route([{'lat': 48.8584, 'lng': 2.2945},
-                                          {'lat': 48.8585, 'lng': 2.2945}])
+        with patch.object(app_module.http_requests, 'get', delayed_lookup):
+            reply = self.client.post('/api/route/start', json={'waypoints': [
+                {'lat': 48.8584, 'lng': 2.2945}, {'lat': 48.8585, 'lng': 2.2945}]})
+        self.assertEqual(reply.status_code, 400)
+        self.assertIn('cancelled', reply.json['error'])
         self.assertEqual(self.simulator.writes, [])
         self.assertFalse(self.service._route_active)
 
@@ -158,6 +160,18 @@ class MovementFlowTests(unittest.TestCase):
         self.assertEqual(self.service.current_location, {'lat': 48.86, 'lon': 2.30})
         self.assertEqual(self.simulator.writes[-1], (48.86, 2.30))
 
+    def test_successful_teleport_survives_history_write_failure(self):
+        with patch.object(self.service, 'add_to_history',
+                          side_effect=OSError('disk full')), self.assertLogs(
+                              app_module.app.logger, level='WARNING'):
+            response = self.client.post(
+                '/api/location/set', json={'lat': 48.86, 'lon': 2.30}
+            )
+
+        self.assertEqual(response.status_code, 200, response.data)
+        self.assertEqual(self.service.current_location, {'lat': 48.86, 'lon': 2.30})
+        self.assertEqual(self.simulator.writes[-1], (48.86, 2.30))
+
     def test_failed_reset_keeps_location_visible_and_can_be_retried(self):
         from unittest.mock import AsyncMock
         self.service.set_location(48.86, 2.30)
@@ -166,8 +180,24 @@ class MovementFlowTests(unittest.TestCase):
         self.assertEqual(response.status_code, 500)
         self.assertIn('Connection lost', response.json['error'])
         self.assertIsNotNone(self.service.current_location)
+        self.assertTrue(self.service._keepalive_active)
         self.assertEqual(self.client.post('/api/location/clear').status_code, 200)
         self.assertIsNone(self.service.current_location)
+
+    def test_failed_set_preserves_cooldown_and_restores_previous_keepalive(self):
+        self.service.set_location(48.86, 2.30)
+        previous_location = dict(self.service.current_location)
+        previous_teleport = self.service._last_teleport_time
+        previous_cooldown = self.service._cooldown_end
+
+        with patch.object(self.service, '_sim_set', side_effect=RuntimeError('Connection lost')):
+            response = self.client.post('/api/location/set', json={'lat': 49.0, 'lon': 3.0})
+
+        self.assertEqual(response.status_code, 500)
+        self.assertEqual(self.service.current_location, previous_location)
+        self.assertEqual(self.service._last_teleport_time, previous_teleport)
+        self.assertEqual(self.service._cooldown_end, previous_cooldown)
+        self.assertTrue(self.service._keepalive_active)
 
     def test_reset_waits_for_an_inflight_joystick_write(self):
         entered, release = threading.Event(), threading.Event()
@@ -189,6 +219,15 @@ class MovementFlowTests(unittest.TestCase):
         self.assertIsNone(self.service.current_location)
         self.assertFalse(self.service._keepalive_active)
         self.assertEqual(self.simulator.clears, 1)
+
+    def test_reset_uses_the_final_moved_fix_for_the_next_cooldown(self):
+        self.service.set_location(0, 0)
+        self.service.current_location = {'lat': 10, 'lon': 10}
+        self.service.clear_location()
+
+        self.service.set_location(10.001, 10)
+
+        self.assertEqual(self.service.get_cooldown()['total_seconds'], 60)
 
 
 if __name__ == '__main__':
