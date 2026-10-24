@@ -4,7 +4,7 @@ import json
 import os
 import tempfile
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import app as app_module
 import location_service
@@ -142,6 +142,21 @@ class FeatureApiTests(unittest.TestCase):
             response = self.client.post('/api/route/circular', json={"lat": 0, "lon": 0, **extra})
             self.assertEqual(response.status_code, 400)
 
+    def test_non_finite_integer_inputs_return_json_400(self):
+        responses = [
+            self.client.get('/api/search?q=coffee&zoom=1e309'),
+            self.client.post(
+                '/api/route/circular',
+                data='{"lat":0,"lon":0,"radius":200,"points":1e309}',
+                content_type='application/json',
+            ),
+        ]
+        for response in responses:
+            with self.subTest(path=response.request.path):
+                self.assertEqual(response.status_code, 400, response.data)
+                self.assertTrue(response.is_json)
+                self.assertIn('error', response.get_json())
+
     def test_route_input_is_validated_before_adaptive_network_requests(self):
         base = {"waypoints": [{"lat": 0, "lng": 0}, {"lat": 1, "lng": 1}],
                 "adaptive": True, "coordinates": [[0, 0], [1, 1]]}
@@ -151,6 +166,89 @@ class FeatureApiTests(unittest.TestCase):
                 response = self.client.post('/api/route/start', json={**base, **extra})
                 self.assertEqual(response.status_code, 400, response.data)
             fetch.assert_not_called()
+
+    def test_route_start_translates_osrm_failures_to_stable_json_502(self):
+        base = {
+            "waypoints": [{"lat": 0, "lng": 0}, {"lat": 0.01, "lng": 0.01}],
+            "speed": 5,
+        }
+        bad_status = Mock()
+        bad_status.raise_for_status.side_effect = app_module.http_requests.HTTPError()
+        bad_json = Mock()
+        bad_json.json.side_effect = json.JSONDecodeError("bad", "", 0)
+        bad_shape = Mock()
+        bad_shape.json.return_value = {"code": "Ok", "routes": [{}]}
+        failures = [
+            app_module.http_requests.Timeout(), bad_status, bad_json, bad_shape,
+        ]
+
+        with patch.object(app_module, '_check_ready', return_value=None):
+            for failure in failures:
+                with self.subTest(failure=type(failure).__name__):
+                    effect = failure if isinstance(failure, Exception) else None
+                    result = failure if effect is None else None
+                    with patch.object(app_module.http_requests, 'get',
+                                      side_effect=effect, return_value=result):
+                        response = self.client.post('/api/route/start', json=base)
+                    self.assertEqual(response.status_code, 502, response.data)
+                    self.assertEqual(response.get_json(), {
+                        'error': 'Routing service unavailable',
+                    })
+
+    def test_short_fully_matched_routes_enable_adaptive_speed(self):
+        road = {
+            'type': 'way',
+            'tags': {'highway': 'residential', 'maxspeed': '20'},
+            'geometry': [
+                {'lon': 0.0, 'lat': 0.0},
+                {'lon': 0.002, 'lat': 0.0},
+            ],
+        }
+        with patch.object(app_module, '_overpass_elements', return_value=[road]):
+            for coordinates, expected in (
+                    ([[0.0, 0.0], [0.001, 0.0]], [20.0]),
+                    ([[0.0, 0.0], [0.001, 0.0], [0.002, 0.0]], [20.0, 20.0])):
+                with self.subTest(segments=len(coordinates) - 1):
+                    self.assertEqual(
+                        app_module._fetch_speed_profile(coordinates, 48),
+                        (expected, []),
+                    )
+
+    def test_adaptive_start_fetches_geometry_before_speed_profile(self):
+        coordinates = [[0.0, 0.0], [0.001, 0.0]]
+        payload = {
+            'waypoints': [{'lat': 0.0, 'lng': 0.0}, {'lat': 0.0, 'lng': 0.001}],
+            'speed': 48, 'adaptive': True,
+        }
+        with patch.object(app_module, '_check_ready', return_value=None), patch.object(
+                app_module, '_fetch_osrm_geometry', return_value=coordinates) as geometry, patch.object(
+                app_module, '_fetch_speed_profile', return_value=([25], [[1, 'signal']])) as profile, patch.object(
+                self.service, 'start_route', return_value={'status': 'started'}) as start:
+            response = self.client.post('/api/route/start', json=payload)
+
+        self.assertEqual(response.status_code, 200, response.data)
+        self.assertTrue(response.get_json()['adaptive'])
+        geometry.assert_called_once_with(payload['waypoints'])
+        profile.assert_called_once_with(coordinates, 48.0)
+        self.assertEqual(start.call_args.kwargs['coordinates'], coordinates)
+        self.assertEqual(start.call_args.kwargs['speeds'], [25])
+        self.assertEqual(start.call_args.kwargs['holds'], [[1, 'signal']])
+
+    def test_adaptive_start_reports_unavailable_profile_honestly(self):
+        coordinates = [[0.0, 0.0], [0.001, 0.0]]
+        payload = {
+            'waypoints': [{'lat': 0.0, 'lng': 0.0}, {'lat': 0.0, 'lng': 0.001}],
+            'speed': 48, 'adaptive': True,
+        }
+        with patch.object(app_module, '_check_ready', return_value=None), patch.object(
+                app_module, '_fetch_osrm_geometry', return_value=coordinates), patch.object(
+                app_module, '_fetch_speed_profile', return_value=None), patch.object(
+                self.service, 'start_route', return_value={'status': 'started'}) as start:
+            response = self.client.post('/api/route/start', json=payload)
+
+        self.assertEqual(response.status_code, 200, response.data)
+        self.assertFalse(response.get_json()['adaptive'])
+        self.assertIsNone(start.call_args.kwargs['speeds'])
 
     def test_switching_movement_stops_competing_runners(self):
         self.service.current_location = {"lat": 0, "lon": 0}

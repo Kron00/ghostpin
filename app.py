@@ -466,10 +466,13 @@ def api_set_location():
         loc_svc.stop_wander()
         _seed_cooldown_reference()
         result = loc_svc.set_location(lat, lon)
-        loc_svc.add_to_history(lat, lon)
-        return jsonify(result)
     except Exception as e:
         return jsonify({"error": str(e)}), 500
+    try:
+        loc_svc.add_to_history(lat, lon)
+    except Exception:
+        app.logger.warning("Location history write failed after teleport", exc_info=True)
+    return jsonify(result)
 
 
 @app.route("/api/location/clear", methods=["POST"])
@@ -876,7 +879,10 @@ def api_search():
 
     focus = _parse_focus(request.args)
     try:
-        zoom = max(2, min(18, int(float(request.args.get("zoom", 12)))))
+        zoom_value = float(request.args.get("zoom", 12))
+        if not math.isfinite(zoom_value):
+            return jsonify({"error": "Zoom must be a finite number"}), 400
+        zoom = max(2, min(18, int(zoom_value)))
     except (TypeError, ValueError):
         zoom = 12
     country_code = request.args.get("country", "us").strip().lower()
@@ -1287,6 +1293,13 @@ def _build_road_graph(lat, lon, radius_m, cache_key):
             continue
         if element.get("type") == "way":
             tags = element.get("tags") or {}
+            access = next((
+                str(tags[key]).strip().lower()
+                for key in ("motorcar", "motor_vehicle", "vehicle", "access")
+                if tags.get(key) is not None
+            ), None)
+            if access in ("no", "private"):
+                continue
             speed = _parse_maxspeed(tags.get("maxspeed")) or \
                 _CLASS_DEFAULT_KMH.get(tags.get("highway"))
             direction = _roam_way_direction(tags)
@@ -1755,10 +1768,10 @@ def _random_walk(graph, start_lat, start_lon, target_km, walk_state=None):
                     state_is_valid = True
 
     if not state_is_valid:
-        # Initial chunk: snap to the closest vertex of a legally traversable
-        # live edge. At a junction there is no incoming road yet, so let the
-        # normal random choice consider every legal departure. Mid-edge, follow
-        # only an allowed OSM-way direction to its endpoint.
+        # Initial chunk: project onto the closest legally traversable live edge.
+        # At a junction there is no incoming road yet, so let the normal random
+        # choice consider every legal departure. Mid-edge, follow only an
+        # allowed OSM-way direction to its endpoint.
         start = (start_lon, start_lat)
         best = None
         for edge_id, edge in enumerate(edges):
@@ -1768,30 +1781,45 @@ def _random_walk(graph, start_lat, start_lon, target_km, walk_state=None):
             ]
             if not origins:
                 continue
-            for index, point in enumerate(edge["points"]):
+            for index, (first, second) in enumerate(
+                    zip(edge["points"], edge["points"][1:])):
+                first_x = (first[0] - start[0]) * 111320.0 * cos_lat
+                first_y = (first[1] - start[1]) * 111320.0
+                segment_x = (second[0] - first[0]) * 111320.0 * cos_lat
+                segment_y = (second[1] - first[1]) * 111320.0
+                length_squared = segment_x * segment_x + segment_y * segment_y
+                fraction = 0.0 if length_squared <= 0 else max(0.0, min(
+                    1.0, -(first_x * segment_x + first_y * segment_y)
+                    / length_squared,
+                ))
+                point = (
+                    first[0] + (second[0] - first[0]) * fraction,
+                    first[1] + (second[1] - first[1]) * fraction,
+                )
                 distance = metres(point, start)
                 if best is None or distance < best[0]:
-                    best = (distance, edge_id, index, origins)
+                    best = (distance, edge_id, index, fraction, point, origins)
         if best is None:
             return None
-        _, edge_id, index, origins = best
+        _, edge_id, index, fraction, point, origins = best
         edge = edges[edge_id]
-        if index == 0:
+        if index == 0 and fraction == 0:
             node = edge["a"]
             coordinates.append(list(edge["points"][0]))
-        elif index == len(edge["points"]) - 1:
+        elif index == len(edge["points"]) - 2 and fraction == 1:
             node = edge["b"]
             coordinates.append(list(edge["points"][-1]))
         else:
             origin = random.choice(origins)
             if origin == edge["a"]:
                 points, ids, node = (
-                    edge["points"][index:], edge["ids"][index:], edge["b"]
+                    [point, *edge["points"][index + 1:]],
+                    [None, *edge["ids"][index + 1:]], edge["b"]
                 )
             else:
                 points, ids, node = (
-                    list(reversed(edge["points"][:index + 1])),
-                    list(reversed(edge["ids"][:index + 1])), edge["a"]
+                    [point, *reversed(edge["points"][:index + 1])],
+                    [None, *reversed(edge["ids"][:index + 1])], edge["a"]
                 )
             append_leg(points, ids, edge["speed"])
             recent.append(edge_id)
@@ -2265,7 +2293,11 @@ def _fetch_speed_profile(coordinates, fallback_kmh):
 
             # Sparse tags are not enough to claim adaptive speed, but known
             # junctions remain useful independently of road-limit coverage.
-            if tagged >= max(3, len(matched_speeds) * 0.1):
+            required = min(
+                len(matched_speeds),
+                max(3, math.ceil(len(matched_speeds) * 0.1)),
+            )
+            if tagged >= required:
                 # The motion engine already plans acceleration between segments;
                 # averaging here could raise a low posted ceiling above its limit.
                 speeds = matched_speeds
@@ -2386,6 +2418,33 @@ def api_route_calculate():
         return jsonify({"error": "Google Maps route service is unavailable"}), 502
 
 
+def _fetch_osrm_geometry(waypoints):
+    coords = ";".join(f"{point['lng']},{point['lat']}" for point in waypoints)
+    url = (f"https://router.project-osrm.org/route/v1/driving/{coords}"
+           "?geometries=geojson&overview=full")
+    response = http_requests.get(url, timeout=15)
+    response.raise_for_status()
+    data = response.json()
+    if not isinstance(data, dict) or data.get("code") != "Ok":
+        raise ValueError("OSRM did not return a route")
+    routes = data.get("routes")
+    if not isinstance(routes, list) or not routes or not isinstance(routes[0], dict):
+        raise ValueError("OSRM response is missing a route")
+    geometry = routes[0].get("geometry")
+    if not isinstance(geometry, dict):
+        raise ValueError("OSRM response is missing route geometry")
+    raw_coordinates = geometry.get("coordinates")
+    if (not isinstance(raw_coordinates, list)
+            or not 2 <= len(raw_coordinates) <= 20000):
+        raise ValueError("OSRM route geometry is invalid")
+
+    coordinates = []
+    for point in raw_coordinates:
+        if not isinstance(point, (list, tuple)) or len(point) < 2:
+            raise ValueError("OSRM route geometry is invalid")
+        lat, lon = LocationService.validate_coordinates(point[1], point[0])
+        coordinates.append([lon, lat])
+    return coordinates
 
 
 @app.route("/api/route/start", methods=["POST"])
@@ -2431,6 +2490,13 @@ def api_route_start():
                 raise ValueError("Speed profile values must be between 1 and 300 km/h")
     except (TypeError, ValueError) as exc:
         return jsonify({"error": str(exc) or "Invalid route request"}), 400
+
+    if coordinates is None:
+        try:
+            coordinates = _fetch_osrm_geometry(waypoints)
+        except (http_requests.RequestException, json.JSONDecodeError,
+                KeyError, TypeError, ValueError):
+            return jsonify({"error": "Routing service unavailable"}), 502
 
     speeds = None
     adaptive_holds = []
@@ -2525,8 +2591,11 @@ def api_route_circular():
         lat = float(data["lat"])
         lon = float(data["lon"])
         radius = float(data.get("radius", 200))
-        points = int(data.get("points", 36))
-    except (KeyError, TypeError, ValueError):
+        point_count = float(data.get("points", 36))
+        if not all(math.isfinite(value) for value in (lat, lon, radius, point_count)):
+            raise ValueError
+        points = int(point_count)
+    except (KeyError, TypeError, ValueError, OverflowError):
         return jsonify({"error": "lat, lon, and radius are required"}), 400
 
     try:

@@ -158,6 +158,18 @@ class MovementFlowTests(unittest.TestCase):
         self.assertEqual(self.service.current_location, {'lat': 48.86, 'lon': 2.30})
         self.assertEqual(self.simulator.writes[-1], (48.86, 2.30))
 
+    def test_successful_teleport_survives_history_write_failure(self):
+        with patch.object(self.service, 'add_to_history',
+                          side_effect=OSError('disk full')), self.assertLogs(
+                              app_module.app.logger, level='WARNING'):
+            response = self.client.post(
+                '/api/location/set', json={'lat': 48.86, 'lon': 2.30}
+            )
+
+        self.assertEqual(response.status_code, 200, response.data)
+        self.assertEqual(self.service.current_location, {'lat': 48.86, 'lon': 2.30})
+        self.assertEqual(self.simulator.writes[-1], (48.86, 2.30))
+
     def test_failed_reset_keeps_location_visible_and_can_be_retried(self):
         from unittest.mock import AsyncMock
         self.service.set_location(48.86, 2.30)
