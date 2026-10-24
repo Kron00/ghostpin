@@ -20,6 +20,7 @@ TUNNELD_PORT = 49151
 TUNNELD_URL = f"http://127.0.0.1:{TUNNELD_PORT}"
 IS_WINDOWS = platform.system() == "Windows"
 IS_FROZEN = getattr(sys, "frozen", False)
+_tunneld_owned = False
 
 
 def is_tunneld_running():
@@ -127,6 +128,7 @@ def _start_windows(exe, args, log):
 
 def ensure_tunnel(timeout=30):
     """Ensure tunneld is running. Start it if needed."""
+    global _tunneld_owned
     if is_tunneld_running():
         print("[+] Tunnel already running")
         return True
@@ -139,12 +141,30 @@ def ensure_tunnel(timeout=30):
     print("[*] Waiting for tunnel...")
     for _ in range(timeout):
         if is_tunneld_running():
+            _tunneld_owned = True
             print("[+] Tunnel ready")
             return True
         time.sleep(1)
 
     print(f"[!] Tunnel timeout. Check {_log_path()}")
     return False
+
+
+def stop_owned_tunnel():
+    """Stop tunneld only when this Ghostpin process started it."""
+    global _tunneld_owned
+    if not _tunneld_owned:
+        return False
+
+    # Clear ownership before the request. The daemon may close the connection
+    # while handling SIGINT, and retrying later could stop a replacement daemon.
+    _tunneld_owned = False
+    try:
+        response = http_requests.get(f"{TUNNELD_URL}/shutdown", timeout=2)
+        return response.status_code == 200
+    except Exception as exc:
+        print(f"[!] Failed to stop tunnel: {exc}")
+        return False
 
 
 def run_tunneld_directly():

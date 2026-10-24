@@ -113,7 +113,7 @@ def _check_ready():
     if device_mgr is None:
         return jsonify({"error": "Tunnel not connected. Ensure iPhone is plugged in and restart the app."}), 503
     if loc_svc is None or loc_svc.simulator is None or loc_svc.bridge is None:
-        return jsonify({"error": "No device connected. Plug in your iPhone and restart."}), 503
+        return jsonify({"error": "Connect an iPhone from Device options, then try again."}), 503
     info = getattr(device_mgr, "device_info", {})
     if info.get("connected") is False:
         return jsonify({"error": info.get("error") or "iPhone disconnected. Reconnect and try again."}), 503

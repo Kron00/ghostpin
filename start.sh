@@ -16,23 +16,37 @@ echo ""
 PYTHON=""
 for p in /opt/homebrew/bin/python3.13 /opt/homebrew/bin/python3.12 python3.13 python3.12 python3; do
     if command -v "$p" &>/dev/null; then
-        PYTHON="$(command -v "$p")"
-        break
+        CANDIDATE="$(command -v "$p")"
+        if "$CANDIDATE" -c 'import sys; raise SystemExit(sys.version_info < (3, 10))' \
+                &>/dev/null; then
+            PYTHON="$CANDIDATE"
+            break
+        fi
     fi
 done
 if [ -z "$PYTHON" ]; then
     echo "[!] Python 3.10+ is required."
     exit 1
 fi
-
-PY_MINOR="$($PYTHON -c 'import sys; print(sys.version_info.minor)')"
-if [ "$PY_MINOR" -lt 10 ]; then
-    echo "[!] Python 3.10+ is required; found $($PYTHON --version)."
-    exit 1
-fi
 echo "[+] Using $($PYTHON --version) at $PYTHON"
 
-if [ ! -x "$VENV_DIR/bin/python3" ]; then
+VENV_PYTHON="$VENV_DIR/bin/python3"
+if "$VENV_PYTHON" -c \
+        'import sys; raise SystemExit(sys.version_info < (3, 10))' \
+        &>/dev/null; then
+    echo "[*] Using existing virtual environment"
+else
+    if [ -e "$VENV_DIR" ] || [ -L "$VENV_DIR" ]; then
+        TIMESTAMP="$(date +%Y%m%d-%H%M%S)"
+        BROKEN_VENV="$SCRIPT_DIR/.venv.broken-$TIMESTAMP"
+        SUFFIX=1
+        while [ -e "$BROKEN_VENV" ] || [ -L "$BROKEN_VENV" ]; do
+            BROKEN_VENV="$SCRIPT_DIR/.venv.broken-$TIMESTAMP-$SUFFIX"
+            SUFFIX=$((SUFFIX + 1))
+        done
+        echo "[*] Moving unusable virtual environment to $(basename "$BROKEN_VENV")"
+        mv "$VENV_DIR" "$BROKEN_VENV"
+    fi
     echo "[*] Creating virtual environment..."
     "$PYTHON" -m venv "$VENV_DIR"
 fi

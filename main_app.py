@@ -2,7 +2,6 @@
 
 import sys
 import os
-import re
 import threading
 import time
 import socket
@@ -40,33 +39,6 @@ class NativeApi:
 
     def check_for_updates(self):
         return self._updater.check()
-
-    def save_gpx(self, content, suggested_filename="route.gpx"):
-        """Show a macOS save dialog and write the exported GPX to disk."""
-        if not self.window:
-            return {"ok": False, "error": "Native window is not ready"}
-
-        safe_name = re.sub(r"[^A-Za-z0-9._ -]+", "-", suggested_filename).strip(" .-")
-        if not safe_name.lower().endswith(".gpx"):
-            safe_name += ".gpx"
-        safe_name = safe_name or "route.gpx"
-
-        try:
-            import webview
-
-            selected = self.window.create_file_dialog(
-                webview.FileDialog.SAVE,
-                save_filename=safe_name,
-                file_types=("GPX route (*.gpx)",),
-            )
-            if not selected:
-                return {"ok": False, "cancelled": True}
-            path = selected[0] if isinstance(selected, (tuple, list)) else selected
-            with open(path, "w", encoding="utf-8", newline="\n") as handle:
-                handle.write(content)
-            return {"ok": True, "path": path}
-        except Exception as exc:
-            return {"ok": False, "error": str(exc)}
 
 
 def start_backend():
